@@ -34,9 +34,9 @@ OPTIONS = {
     "plist": PLIST,
     # 동적 import(백엔드 자동 선택, 플러그인 로딩)를 쓰는 패키지는 통째로 복사해
     # modulegraph가 놓치는 모듈이 없도록 한다.
+    # 'google'은 __init__.py 없는 네임스페이스 패키지라 packages 에 넣으면 py2app이
+    # 찾지 못한다(ImportError: No module named 'google'). 그래서 includes 로 추적시킨다.
     "packages": [
-        "google.genai",
-        "google.auth",
         "pydantic",
         "pydantic_core",
         "httpx",
@@ -51,7 +51,19 @@ OPTIONS = {
         "ScreenCaptureKit",
         "dotenv",
     ],
-    "includes": ["typing_extensions", "config", "analyzer", "capture", "hotkey"],
+    "includes": [
+        "google.genai",
+        "google.genai.types",
+        "google.genai.errors",
+        "google.auth",
+        "google.auth.transport.requests",
+        "google.oauth2.service_account",
+        "typing_extensions",
+        "config",
+        "analyzer",
+        "capture",
+        "hotkey",
+    ],
     "excludes": ["tkinter", "unittest", "pytest", "numpy", "matplotlib"],
 }
 if ICON.exists():

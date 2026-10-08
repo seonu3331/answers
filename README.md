@@ -13,31 +13,72 @@ Gemini(`gemini-2.5-flash`)로 분석하고, 결과를 메뉴바에 짧게 표시
 AlDente처럼 **Dock 아이콘과 메뉴바가 함께 보이는 일반 앱**입니다(`LSUIElement = False`).
 그래서 시스템 설정의 권한 목록에서 `ScreenAnswer`를 쉽게 찾을 수 있습니다.
 
-## 1. .app 빌드 (권장)
+> 대상 환경: **Apple Silicon Mac (M1 이상) + macOS 26**
+
+## 1. 설치 방법 A — 빌드된 DMG 받기 (가장 쉬움)
+
+GitHub Actions가 macOS 26 Apple Silicon 머신에서 앱을 빌드해 `.dmg`로 올려 둡니다.
+
+1. 저장소의 **Releases**(태그 `v*` 빌드) 또는 **Actions → Build macOS app → 최신 성공 실행 → Artifacts**에서
+   `ScreenAnswer-arm64`를 받습니다. Artifacts는 zip으로 받아지므로 압축을 풀면 `.dmg`가 나옵니다.
+2. `.dmg`를 더블 클릭해 열고, `ScreenAnswer`를 옆의 `Applications` 폴더로 드래그합니다.
+3. **처음 열 때 차단 해제** (Apple 공증을 받지 않은 앱이라 한 번은 필요합니다)
+   - `응용 프로그램`에서 ScreenAnswer를 더블 클릭 → "Apple이 확인할 수 없습니다" 경고가 뜨면 **완료**를 누릅니다.
+   - **시스템 설정 → 개인정보 보호 및 보안** 맨 아래의 "ScreenAnswer이(가) 차단되었습니다" 옆 **그래도 열기**를 누르고 암호를 입력합니다.
+   - 또는 터미널에서 한 줄로 해결할 수 있습니다.
+     ```bash
+     xattr -dr com.apple.quarantine /Applications/ScreenAnswer.app
+     ```
+4. 이후 단계는 아래 **3. API 키 설정**, **4. macOS 권한**을 따르세요.
+
+## 2. 설치 방법 B — 소스를 받아 직접 빌드
+
+### 2-1. 준비물 (최초 1회)
 
 ```bash
-./build_app.sh             # dist/ScreenAnswer.app 생성
-./build_app.sh --install   # 빌드 후 /Applications 에 복사
-open dist/ScreenAnswer.app # 또는 Finder에서 더블 클릭
+xcode-select --install          # Git, 컴파일 도구 (이미 있으면 "already installed" 메시지)
 ```
 
-빌드 스크립트가 하는 일: `.venv` 생성 → 의존성과 py2app 설치 → 아이콘(`assets/ScreenAnswer.icns`) 생성
-→ `python setup.py py2app` → ad-hoc 코드 서명(`codesign --sign -`).
+Python 3.12를 설치합니다. 둘 중 하나를 고르세요.
+- [python.org](https://www.python.org/downloads/macos/)의 macOS 64-bit universal2 설치 파일 (**권장**)
+- Homebrew: `brew install python@3.12`
 
-- 개발 중 빠른 확인: `./build_app.sh --alias` (소스를 참조하는 번들, 다른 Mac에 배포 불가)
-- 다른 Python을 쓰려면: `PYTHON=/opt/homebrew/bin/python3.12 ./build_app.sh`
-  (python.org 또는 Homebrew Python 권장. pyenv는 `--enable-framework`/`--enable-shared` 빌드가 필요)
-- 실행 로그: `~/Library/Logs/ScreenAnswer.log`
+macOS 기본 `/usr/bin/python3`(3.9)는 너무 오래돼서 쓰면 안 됩니다. 버전을 확인하세요.
+```bash
+python3.12 --version            # Python 3.12.x
+```
 
-## 2. 소스에서 바로 실행 (개발용)
+### 2-2. 소스 받기
+
+비공개 저장소이므로 GitHub에 로그인한 상태에서 받아야 합니다.
+
+- **웹으로 받기**: 저장소 페이지 → 초록색 **Code** 버튼 → **Download ZIP** → 압축 해제
+- **git으로 받기**: `git clone https://github.com/seonu3331/answers.git`
+  (암호 대신 [Personal Access Token](https://github.com/settings/tokens)을 입력하거나 `gh auth login` 사용)
+
+### 2-3. 빌드 및 설치
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
+cd ~/Downloads/answers                         # 압축을 푼(또는 clone한) 폴더
+chmod +x build_app.sh make_dmg.sh              # ZIP으로 받으면 실행 권한이 빠질 수 있음
+PYTHON=python3.12 ./build_app.sh --install     # 빌드 → /Applications/ScreenAnswer.app
+open /Applications/ScreenAnswer.app
+```
+
+- 빌드는 3~5분 걸립니다. 직접 빌드한 앱은 차단 해제(방법 A의 3단계)가 필요 없습니다.
+- 배포용 `.dmg`가 필요하면 `./make_dmg.sh`를 실행하세요 → `dist/ScreenAnswer-<버전>-arm64.dmg`
+- 개발 중 빠른 확인: `./build_app.sh --alias` (소스를 참조하는 번들)
+- 실행 로그: `~/Library/Logs/ScreenAnswer.log`
+
+### 2-4. (개발용) 터미널에서 바로 실행
+
+```bash
+python3.12 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 python main.py
 ```
 
-이 경우 Dock 아이콘과 권한 목록에는 앱 대신 Python/터미널이 표시됩니다.
+이 경우 Dock 아이콘과 권한 목록에는 앱 대신 Python/터미널이 표시되고, 권한도 터미널 앱에 줘야 합니다.
 
 ## 3. API 키 설정
 
@@ -63,7 +104,13 @@ python main.py
 | 손쉬운 사용 / 입력 모니터링 | 전역 단축키 감지 (pynput) |
 | 화면 기록 | 화면 캡처 (mss). 없으면 바탕화면만 찍힘 |
 
-권한을 바꾼 뒤에는 앱을 다시 시작하세요.
+권한을 바꾼 뒤에는 앱을 다시 시작하세요(메뉴 `종료(Quit)` 후 다시 실행).
+화면 기록 권한이 없으면 메뉴바에 `⚠ 화면 기록 권한 필요`가 표시됩니다.
+
+캡처가 이상하면 진단 도구로 확인하세요. 결과 이미지는 바탕화면에 저장됩니다.
+```bash
+.venv/bin/python scripts/capture_check.py
+```
 **다시 빌드하면 서명이 바뀌어 권한이 풀릴 수 있습니다.** 이때는 목록에서 `ScreenAnswer`를 `−`로 지우고 다시 추가하세요.
 
 ## 5. 사용법
@@ -79,9 +126,11 @@ python main.py
 | `main.py` | rumps 메뉴바 앱, 키 입력 창, 상태 표시, 5초 자동 복귀 |
 | `config.py` | API 키 저장/로드 (Keychain → `~/.rubric_gemini/config.json`) |
 | `hotkey.py` | pynput 수정키 조합 감지, 커서 좌표 조회 |
-| `capture.py` | 커서 중심 캡처, 모니터 경계 보정, Retina 배율 계산, 커서 마커 표시 |
+| `capture.py` | 커서 중심 캡처(ScreenCaptureKit 우선, mss 대체), 모니터 경계 보정, Retina 배율 계산, 커서 마커 표시 |
 | `analyzer.py` | google-genai 호출, JSON 스키마 강제, 객관식 번호 정규화 |
-| `setup.py` / `build_app.sh` / `make_icon.py` | py2app 빌드 설정, 빌드 스크립트, 아이콘 생성 |
+| `setup.py` / `build_app.sh` / `make_icon.py` / `make_dmg.sh` | py2app 빌드 설정, 빌드 스크립트, 아이콘 생성, DMG 패키징 |
+| `scripts/capture_check.py` | 캡처 진단 (두 백엔드 비교) |
+| `.github/workflows/build-macos.yml` | macOS 26 Apple Silicon 자동 빌드 → DMG 아티팩트 / 릴리스 |
 
 ## 객관식 번호 정규화
 

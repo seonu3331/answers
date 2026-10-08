@@ -391,7 +391,11 @@ def _self_test() -> int:
     from analyzer import normalize_result
     from capture import screencapturekit_available
 
-    Analyzer(api_key="AIzaSySELFTEST_000000000000000000")
+    # 가짜 키로 실제 HTTPS 요청을 보내 SSL/네트워크 모듈이 번들에 다 들어갔는지 확인한다.
+    try:
+        Analyzer(api_key="AIzaSySELFTEST_000000000000000000").verify()
+    except AnalyzerError as exc:
+        logger.info("가짜 키 확인 요청 → 예상된 거부: %s", exc)
     assert normalize_result("정답: 3번", "choice") == "3"
     assert config.CONFIG_DIR.name == ".rubric_gemini"
     assert screencapturekit_available(), "ScreenCaptureKit 모듈이 번들에 없습니다"
