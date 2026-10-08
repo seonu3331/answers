@@ -3,7 +3,6 @@
 단축키:
   * ⌃ Control + ⌥ Option + ⌘ Command      → 1회 분석 (수정키만, 떼는 순간 실행)
   * ⌃ Control + ⌥ Option + ⌘ Command + A  → 5초 자동 분석 켜기/끄기 (A를 누르는 순간 실행)
-    ⌃⌥⇧⌘ 네 키 조합은 Raycast·Karabiner 등에서 'Hyper 키'로 널리 쓰여 충돌하므로 쓰지 않는다.
     ⌃⌥⌘ + 글자 조합은 macOS 기본 단축키에 없다(⌃⌥⌘8, ⌃⌥⌘, ⌃⌥⌘. 등 손쉬운 사용 단축키는 숫자/기호).
 
 pynput 대신 Quartz를 직접 쓰는 이유:
