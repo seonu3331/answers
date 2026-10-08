@@ -34,6 +34,12 @@ _fix_ssl_cert_env()
 
 DEFAULT_MODEL = "gemini-3.1-flash-lite"
 
+# 사고(thinking) 토큰 예산. 0이면 끄고(가장 빠름), 어려운 문제(킬러 문항)는 1024~4096 권장.
+# Flash-Lite 계열 일부(gemini-3.5-flash-lite, gemini-flash-lite-latest)는 0을 거부(400)하므로 1 이상으로 둔다.
+THINKING_BUDGET = 0
+# 답(JSON) 자체에 필요한 출력 토큰. 사고 토큰은 이와 별도로 더해 준다.
+ANSWER_MAX_TOKENS = 2048
+
 SYSTEM_PROMPT = """\
 이미지 내 마우스 커서 주변의 텍스트나 질문을 빠르게 분석하세요.
 이미지의 빨간 원과 십자 표시가 마우스 커서 위치입니다. 그 위치에 가장 가까운 내용을 우선 분석하세요.
@@ -212,9 +218,8 @@ class Analyzer:
             response_mime_type="application/json",
             response_schema=AnalysisResult,
             temperature=0.2,
-            max_output_tokens=2048,
-            # 저지연을 위해 사고(thinking) 토큰을 끈다.
-            thinking_config=types.ThinkingConfig(thinking_budget=0),
+            max_output_tokens=ANSWER_MAX_TOKENS + THINKING_BUDGET,
+            thinking_config=types.ThinkingConfig(thinking_budget=THINKING_BUDGET),
         )
 
     def verify(self) -> None:

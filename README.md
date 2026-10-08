@@ -162,19 +162,76 @@ v1.3.1 이하로 빌드한 앱에서 생기던 문제로, **v1.4.0에서 고쳐�
 ### `⚠ API 오류 503`이 뜰 때
 
 Google 서버에서 해당 모델이 일시적으로 과부하인 상태입니다(키 문제 아님). 잠시 후 다시 시도하거나
-아래 **모델 바꾸기**로 더 가벼운 모델을 쓰세요.
+아래 **모델 바꾸기**에서 503이 적은 모델(`gemini-3.1-flash-lite`, `gemini-3.5-flash`)로 바꾸세요.
 
 ## 모델 바꾸기
 
-기본 모델은 `analyzer.py`의 `DEFAULT_MODEL`(`gemini-3.1-flash-lite`)입니다. 바꾸는 방법:
+모델과 사고(thinking) 설정은 `analyzer.py` 맨 위의 상수 두 개로 정합니다. 바꾼 뒤 다시 빌드·설치하세요
+(`./build_app.sh --install` → 권한 재허용).
 
-- **영구적으로**: `analyzer.py`의 `DEFAULT_MODEL`을 수정한 뒤 다시 빌드·설치
-- **개발용 실행에서만**: 환경 변수 `GEMINI_MODEL=gemini-2.5-flash python main.py`
+```python
+DEFAULT_MODEL = "gemini-3.1-flash-lite"   # 사용할 모델
+THINKING_BUDGET = 0                       # 사고 토큰 예산 (0 = 끔, 가장 빠름)
+```
 
-이미지 입력과 텍스트 출력을 지원하는 Flash / Flash-Lite 계열을 권장합니다
-(예: `gemini-3.5-flash-lite`, `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-flash-lite-latest`).
-앱은 지연을 줄이려 사고(thinking) 토큰을 끄므로(`thinking_budget=0`), 이를 허용하지 않는 Pro 계열은 오류가 날 수 있습니다.
-키로 쓸 수 있는 모델 목록은 다음으로 확인할 수 있습니다.
+개발용 실행(`python main.py`)에서는 환경 변수 `GEMINI_MODEL=gemini-3.5-flash`로 모델만 바꿔 볼 수도 있습니다.
+
+### 💡 팁: 킬러 문항(어려운 수학·추론 문제)을 풀릴 때
+
+기본 설정(`gemini-3.1-flash-lite` + 사고 끔)은 **빠르지만 여러 단계 추론이 필요한 문제는 자주 틀립니다.**
+어려운 문제를 풀릴 때는 **상위 Flash 모델 + 사고 켬**으로 바꾸세요.
+
+```python
+DEFAULT_MODEL = "gemini-3.5-flash"        # 또는 "gemini-3.6-flash"
+THINKING_BUDGET = 2048                    # 1024~4096 권장, 클수록 정확하지만 느림
+```
+
+실측 예 (2026-10, 무료 키, "x² − 5x + 6 = 0 의 두 근의 합은? A) 2 B) 3 C) 5 D) 6", 정답 C → `3`):
+
+| 설정 | 결과 | 응답 시간 |
+| --- | --- | --- |
+| `gemini-3.1-flash-lite`, 사고 0 (기본) | `1` ✗ | 약 1.4초 |
+| `gemini-3.5-flash`, 사고 2048 | `3` ✓ | 약 6.5초 |
+
+- 사고를 켜면 한 문제에 **5~10초** 걸립니다. 그동안 메뉴바에 `..`가 표시됩니다.
+- 사고 토큰은 출력 토큰으로 계산돼 무료 한도(TPM)를 더 빨리 씁니다. **사고를 켠 상태로 5초 자동 분석은 권장하지 않습니다**
+  (응답이 5초보다 길어 사실상 연속 호출이 되고, 일일 한도를 금방 소진합니다). 킬러 문항은 `⌃⌥⌘` 1회 분석으로 푸세요.
+- 평소에는 기본 설정으로 쓰고, 어려운 시험 때만 바꿔 빌드하는 것을 권장합니다.
+
+### 모델별 상태와 무료(Free tier) 제한
+
+2026-10-08 기준, 무료 키로 직접 호출해 확인한 결과입니다.
+
+| 모델 | 무료 사용 | 사고 끔(0) | 사고 켬 | 용도 |
+| --- | --- | --- | --- | --- |
+| `gemini-3.1-flash-lite` | ✅ | ✅ | ✅ | **기본값.** 빠르고 가벼움, 일반 문제·자동 분석용 |
+| `gemini-3.5-flash` | ✅ | ✅ | ✅ | **킬러 문항 추천.** 정확도·속도 균형, 응답 안정적 |
+| `gemini-3.6-flash` | ✅ | ✅ | ✅ | 킬러 문항용 대안 (가끔 503) |
+| `gemini-3.7-flash`, `gemini-3.8-flash` | ✅ | ✅ | ✅ | 최신이지만 **수요가 많아 503(과부하)이 잦음** |
+| `gemini-3.5-flash-lite`, `gemini-flash-lite-latest` | ✅ | ❌ (400 오류) | ✅ | 쓰려면 `THINKING_BUDGET`을 1 이상으로 |
+| `gemini-3.1-pro-preview` | ❌ 유료 전용 | | | 무료 키로는 사용 불가 |
+| `gemini-2.5-*` (2.5 Flash / Flash-Lite / Pro) | ❌ | | | 신규 키에서는 404 (더 이상 제공 안 됨) |
+
+**무료 등급 한도 (RPM = 분당 요청, RPD = 일일 요청)**
+
+- Google은 2026년부터 모델별 무료 한도 숫자를 공식 문서에 공개하지 않고, **계정·프로젝트마다 다르게 적용**합니다.
+  내 실제 한도는 [Google AI Studio](https://aistudio.google.com/)의 **Usage / Rate limit** 화면에서 확인하세요.
+- 2026년 하반기 보고된 대략적인 값(비공식, 참고용):
+
+  | 계열 | RPM | RPD |
+  | --- | --- | --- |
+  | Flash-Lite (`3.1-flash-lite`, `3.5-flash-lite`) | 약 15~30 | 약 500~1,500 |
+  | Flash (`3.5`~`3.8-flash`) | 약 10~15 | **약 20~1,500 (계정에 따라 차이 큼)** |
+
+- 이 앱 기준으로 환산하면:
+  - **1회 분석**: 문제당 요청 1회 → 한도 걱정 거의 없음.
+  - **5초 자동 분석**: 분당 약 12회, 1시간이면 약 720회 → Flash 계열은 일일 한도를 금방 넘길 수 있습니다.
+    자동 분석은 Flash-Lite(기본값)로 쓰세요.
+  - 한도를 넘으면 메뉴바에 `⚠ 사용량 초과(429)`가 뜨고, 자동 분석은 30초 쉬었다가 재개합니다.
+    일일 한도(RPD)는 태평양 시간 자정(한국 시간 오후 4~5시)에 초기화됩니다.
+- 무료 등급에서는 입력 내용이 Google 제품 개선에 사용될 수 있습니다. 민감한 화면은 분석하지 마세요.
+
+키로 쓸 수 있는 모델 전체 목록은 다음으로 확인할 수 있습니다.
 ```bash
 GEMINI_API_KEY="$(security find-generic-password -s rubric_gemini -a GEMINI_API_KEY -w)" .venv/bin/python -c "from google import genai; [print(m.name) for m in genai.Client().models.list()]"
 ```
@@ -211,6 +268,7 @@ GEMINI_API_KEY="$(security find-generic-password -s rubric_gemini -a GEMINI_API_
 - **변경**: 5초 자동 분석 켜기/끄기 단축키를 `⌃⌥⌘A`(Control + Option + Command + A)로 변경 (키 반복 무시)
 - **변경**: 객관식 결과를 항상 아라비아 숫자로 표시 (A–E, ㄱ–ㅁ, 가–마 → 1–5)
 - **변경**: 기본 모델 `gemini-2.5-flash` → `gemini-3.1-flash-lite`, `max_output_tokens` 256 → 2048
+- **추가**: `analyzer.py`의 `THINKING_BUDGET` 상수로 사고(thinking) 토큰을 켜고 끌 수 있음 (README에 킬러 문항용 모델 추천·무료 한도 정리)
 - selftest(`SCREENANSWER_SELFTEST=1`)에 새 단축키·정규화 검사 추가
 
 ### v1.3.1
