@@ -10,7 +10,7 @@ from pathlib import Path
 from setuptools import setup
 
 APP_NAME = "ScreenAnswer"
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 BUNDLE_ID = "com.rubric.screenanswer"
 ICON = Path("assets/ScreenAnswer.icns")
 
@@ -24,7 +24,7 @@ PLIST = {
     # False(기본값)여야 Dock/앱 전환기에 보이고, 개인정보 보호 설정 목록에서도 찾기 쉽다.
     "LSUIElement": False,
     "LSApplicationCategoryType": "public.app-category.productivity",
-    "LSMinimumSystemVersion": "11.0",
+    "LSMinimumSystemVersion": "14.0",  # ScreenCaptureKit 스크린샷 API
     "NSHighResolutionCapable": True,
     "NSHumanReadableCopyright": "ScreenAnswer",
 }
@@ -48,6 +48,7 @@ OPTIONS = {
         "mss",
         "pynput",
         "rumps",
+        "ScreenCaptureKit",
         "dotenv",
     ],
     "includes": ["typing_extensions", "config", "analyzer", "capture", "hotkey"],

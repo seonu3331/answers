@@ -25,7 +25,7 @@ from dotenv import load_dotenv
 
 import config
 from analyzer import Analyzer, AnalyzerError
-from capture import capture_around_cursor
+from capture import CaptureError, capture_around_cursor
 from hotkey import HotkeyListener
 
 APP_NAME = "ScreenAnswer"
@@ -256,7 +256,8 @@ class ScreenAnswerApp(rumps.App):
 
             capture = capture_around_cursor(x, y)
             logger.info(
-                "캡처 완료: 영역=%s, 배율=%.2f, 커서=%s, %d bytes",
+                "캡처 완료(%s): 영역=%s, 배율=%.2f, 커서=%s, %d bytes",
+                capture.backend,
                 capture.region,
                 capture.scale_factor,
                 capture.cursor_in_image,
@@ -268,7 +269,7 @@ class ScreenAnswerApp(rumps.App):
                 "분석 결과(%s): %s | %s", analysis.answer_type, analysis.result, analysis.summary
             )
             self._ui_events.put(("result", (generation, analysis.result, analysis.summary)))
-        except AnalyzerError as exc:
+        except (AnalyzerError, CaptureError) as exc:
             logger.error("분석 실패: %s", exc)
             self._ui_events.put(("error", (generation, str(exc))))
         except Exception as exc:
@@ -388,10 +389,12 @@ def _self_test() -> int:
     from pynput import keyboard, mouse  # noqa: F401
 
     from analyzer import normalize_result
+    from capture import screencapturekit_available
 
     Analyzer(api_key="AIzaSySELFTEST_000000000000000000")
     assert normalize_result("정답: 3번", "choice") == "3"
     assert config.CONFIG_DIR.name == ".rubric_gemini"
+    assert screencapturekit_available(), "ScreenCaptureKit 모듈이 번들에 없습니다"
     logger.info("SELFTEST OK (python %s, frozen=%s)", sys.version.split()[0], IS_APP_BUNDLE)
     return 0
 

@@ -11,16 +11,9 @@ permissions:
 
 jobs:
   build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: macos-15        # Apple Silicon (M1~)
-            arch: arm64
-          - runner: macos-15-intel  # Intel Mac
-            arch: x86_64
-    runs-on: ${{ matrix.runner }}
-    name: build (${{ matrix.arch }})
+    # Apple Silicon + macOS 26 (Tahoe) 전용 빌드
+    runs-on: macos-26
+    name: build (arm64, macOS 26)
 
     steps:
       - uses: actions/checkout@v4
@@ -37,13 +30,18 @@ jobs:
           SCREENANSWER_SELFTEST=1 dist/ScreenAnswer.app/Contents/MacOS/ScreenAnswer
           codesign --verify --deep --strict dist/ScreenAnswer.app
           file dist/ScreenAnswer.app/Contents/MacOS/ScreenAnswer
+          sw_vers
+
+      - name: Capture backend check (informational)
+        continue-on-error: true
+        run: .venv/bin/python scripts/capture_check.py --no-save --x 400 --y 300
 
       - name: Package .dmg
         run: ./make_dmg.sh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ScreenAnswer-${{ matrix.arch }}
+          name: ScreenAnswer-arm64
           path: dist/*.dmg
           if-no-files-found: error
 
@@ -64,4 +62,4 @@ jobs:
           gh release create "${GITHUB_REF_NAME}" artifacts/*.dmg \
             --repo "${GITHUB_REPOSITORY}" \
             --title "ScreenAnswer ${GITHUB_REF_NAME}" \
-            --notes "Apple Silicon(M1 이상): *-arm64.dmg / Intel Mac: *-x86_64.dmg"
+            --notes "Apple Silicon Mac (macOS 26) 전용"
