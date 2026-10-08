@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from typing import Literal
 
 from google import genai
 from google.genai import errors, types
@@ -17,20 +18,66 @@ SYSTEM_PROMPT = """\
 이미지의 빨간 원과 십자 표시가 마우스 커서 위치입니다. 그 위치에 가장 가까운 내용을 우선 분석하세요.
 
 규칙:
-1. 객관식 문제나 선택지가 있는 경우: 가장 타당한 번호나 핵심 키워드를 최우선으로 간결하게 추출하세요.
-   (예: "3", "②", "B", "3번 광합성")
-2. 주관식/단답형인 경우: 1~3단어 이내의 핵심 정답을 추출하세요.
-3. 질문이 아닌 일반 텍스트인 경우: 핵심 키워드를 1~3단어로 추출하세요.
-4. 판독할 수 있는 내용이 없으면 result는 "인식 불가"로 하세요.
+1. 번호가 붙은 객관식 문제나 선택지가 있는 경우: answer_type은 "choice"로 하고,
+   result에는 가장 타당한 선택지 번호를 아라비아 숫자 하나로만 쓰세요. (예: "3")
+   번호 대신 알파벳 등으로 구분된 선택지라면 그 기호나 핵심 키워드를 쓰세요. (예: "B")
+2. 주관식/단답형인 경우: answer_type은 "text"로 하고, 1~3단어 이내의 핵심 정답을 추출하세요.
+3. 질문이 아닌 일반 텍스트인 경우: answer_type은 "text"로 하고, 핵심 키워드를 1~3단어로 추출하세요.
+4. 판독할 수 있는 내용이 없으면 answer_type은 "text", result는 "인식 불가"로 하세요.
 5. summary는 근거나 내용을 담은 한국어 1줄 요약(60자 이내)으로 작성하세요.
 6. 반드시 아래 JSON 구조로만 응답하세요. 다른 텍스트는 출력하지 마세요.
-   {"result": "정답 번호 또는 핵심 단어", "summary": "1줄 요약"}
+   {"answer_type": "choice 또는 text", "result": "정답 번호 또는 핵심 단어", "summary": "1줄 요약"}
 """
 
 USER_PROMPT = "커서 주변 내용을 분석해 JSON으로 답하세요."
 
 
+AnswerType = Literal["choice", "text"]
+
+# 원문자/괄호 숫자 → 아라비아 숫자
+_CIRCLED_DIGITS = str.maketrans(
+    {
+        **{c: str(i) for i, c in enumerate("①②③④⑤", start=1)},
+        **{c: str(i) for i, c in enumerate("❶❷❸❹❺", start=1)},
+        **{c: str(i) for i, c in enumerate("➀➁➂➃➄", start=1)},
+        **{c: str(i) for i, c in enumerate("⑴⑵⑶⑷⑸", start=1)},
+        **{c: str(i) for i, c in enumerate("１２３４５", start=1)},
+    }
+)
+
+# 객관식: 다른 숫자에 붙어 있지 않은 맨 앞의 1~5 한 자리 ("정답: 3", "3번", "(3) 광합성")
+_FIRST_CHOICE_DIGIT = re.compile(r"(?<!\d)([1-5])(?!\d)")
+
+# 주관식으로 분류됐어도 형태가 명백히 선택지 번호인 경우만 숫자로 정규화한다.
+# "1945년", "2차 세계대전", "3 kg" 같은 단답은 건드리지 않는다.
+_EXPLICIT_CHOICE_PATTERNS = (
+    re.compile(r"^[(\[]?([1-5])[)\]]?\.?$"),  # "3", "(3)", "3."
+    re.compile(r"^[(\[]?([1-5])[)\]]?\s*번"),  # "3번", "3번 광합성"
+    re.compile(r"^(?:정답|답|answer)\s*(?:은|는|[:：])?\s*[(\[]?([1-5])(?!\d)", re.IGNORECASE),
+)
+
+
+def normalize_result(raw: str, answer_type: AnswerType) -> str:
+    """객관식 정답을 숫자 한 자리('1'~'5')로 정규화한다. 해당 없으면 원문을 정리해 반환."""
+    text = " ".join(raw.translate(_CIRCLED_DIGITS).split())
+    if not text:
+        return "인식 불가"
+
+    if answer_type == "choice":
+        match = _FIRST_CHOICE_DIGIT.search(text)
+        if match:
+            return match.group(1)
+        return text  # "B"처럼 숫자가 아닌 선택지 기호
+
+    for pattern in _EXPLICIT_CHOICE_PATTERNS:
+        match = pattern.match(text)
+        if match:
+            return match.group(1)
+    return text
+
+
 class AnalysisResult(BaseModel):
+    answer_type: AnswerType = Field(description="객관식이면 choice, 그 외는 text")
     result: str = Field(description="정답 번호 또는 핵심 단어 (1~3단어)")
     summary: str = Field(description="1줄 요약")
 
@@ -61,7 +108,9 @@ def _parse_json_text(text: str | None) -> AnalysisResult:
             data = data[0]
         if isinstance(data, dict):
             try:
+                answer_type = data.get("answer_type")
                 return AnalysisResult(
+                    answer_type=answer_type if answer_type in ("choice", "text") else "text",
                     result=str(data.get("result", "")).strip(),
                     summary=str(data.get("summary", "")).strip(),
                 )
@@ -71,13 +120,21 @@ def _parse_json_text(text: str | None) -> AnalysisResult:
     raise AnalyzerError("JSON 파싱 실패")
 
 
+def _api_error_message(exc: errors.APIError) -> str:
+    if exc.code in (400, 401, 403) and "API key" in (exc.message or ""):
+        return "API 키 오류"
+    if exc.code == 429:
+        return "사용량 초과(429)"
+    return f"API 오류 {exc.code}"
+
+
 class Analyzer:
-    def __init__(self, model: str | None = None) -> None:
-        if not os.environ.get("GEMINI_API_KEY") and not os.environ.get("GOOGLE_API_KEY"):
-            raise AnalyzerError("GEMINI_API_KEY 없음")
+    def __init__(self, api_key: str, model: str | None = None) -> None:
+        if not api_key:
+            raise AnalyzerError("API 키 없음")
         self.model = model or os.environ.get("GEMINI_MODEL", DEFAULT_MODEL)
-        # 환경 변수 GEMINI_API_KEY를 자동으로 읽는다.
-        self._client = genai.Client()
+        # GUI/Keychain에서 읽은 키를 명시적으로 전달한다.
+        self._client = genai.Client(api_key=api_key)
         self._config = types.GenerateContentConfig(
             system_instruction=SYSTEM_PROMPT,
             response_mime_type="application/json",
@@ -88,6 +145,13 @@ class Analyzer:
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
 
+    def verify(self) -> None:
+        """키와 모델이 유효한지 가벼운 메타데이터 조회로 확인한다. 실패 시 AnalyzerError."""
+        try:
+            self._client.models.get(model=self.model)
+        except errors.APIError as exc:
+            raise AnalyzerError(_api_error_message(exc)) from exc
+
     def analyze(self, png_bytes: bytes) -> AnalysisResult:
         image = types.Part.from_bytes(data=png_bytes, mime_type="image/png")
         try:
@@ -97,18 +161,16 @@ class Analyzer:
                 config=self._config,
             )
         except errors.APIError as exc:
-            raise AnalyzerError(f"API 오류 {exc.code}") from exc
+            raise AnalyzerError(_api_error_message(exc)) from exc
 
         parsed = response.parsed
         if isinstance(parsed, AnalysisResult):
             result = parsed
         elif isinstance(parsed, dict):
-            result = AnalysisResult(
-                result=str(parsed.get("result", "")), summary=str(parsed.get("summary", ""))
-            )
+            result = _parse_json_text(json.dumps(parsed, ensure_ascii=False))
         else:
             result = _parse_json_text(response.text)
 
-        result.result = result.result.strip() or "인식 불가"
+        result.result = normalize_result(result.result, result.answer_type)
         result.summary = " ".join(result.summary.split())
         return result
