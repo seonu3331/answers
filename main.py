@@ -1,9 +1,13 @@
 """macOS 메뉴바 앱: 단축키 → 커서 주변 캡처 → Gemini 분석 → 메뉴바 타이틀 갱신.
 
 실행: python main.py  (또는 build_app.sh 로 만든 ScreenAnswer.app 더블 클릭)
-단축키: Ctrl + Option + Cmd (세 키를 함께 눌렀다 떼면 실행)
+단축키 (수정키를 함께 눌렀다 떼면 실행):
+  * ⌃ Control + ⌥ Option + ⌘ Command            → 커서 주변 1회 분석
+  * ⌃ Control + ⌥ Option + ⇧ Shift + ⌘ Command  → 5초마다 자동 분석 켜기/끄기
+    (메뉴의 '5초 자동 분석'으로도 켜고 끌 수 있다)
 
-메뉴바 표시: '·' 대기 → '..' 분석 중 → '3' 결과 (5초 후 자동으로 '·' 복귀)
+메뉴바 표시: '·' 대기 → '..' 분석 중 → '3' 결과 (1회 분석은 5초 후 '·' 복귀,
+자동 분석 중에는 결과가 계속 갱신되며 시작 직후에는 '↻' 표시)
 
 Dock 아이콘이 보이는 일반 앱으로 동작하므로(LSUIElement=False) 시스템 설정의
 '손쉬운 사용'/'화면 기록' 목록에서 앱을 쉽게 찾아 권한을 줄 수 있다.
@@ -26,12 +30,25 @@ from dotenv import load_dotenv
 import config
 from analyzer import Analyzer, AnalyzerError
 from capture import CaptureError, capture_around_cursor
-from hotkey import HotkeyListener
+from hotkey import (
+    ACTION_SINGLE,
+    ACTION_TOGGLE_AUTO,
+    HotkeyListener,
+    get_cursor_position,
+    has_input_monitoring_access,
+    request_input_monitoring_access,
+)
 
 APP_NAME = "ScreenAnswer"
 IDLE_TITLE = "·"
 BUSY_TITLE = ".."
+AUTO_IDLE_TITLE = "↻"
 RESULT_DISPLAY_SECONDS = 5.0
+AUTO_INTERVAL_SECONDS = 5.0
+AUTO_RATE_LIMIT_BACKOFF_SECONDS = 30.0
+HOTKEY_WATCHDOG_SECONDS = 3.0
+AUTO_ON_LABEL = "5초 자동 분석 중지  (⌃⌥⇧⌘)"
+AUTO_OFF_LABEL = "5초 자동 분석 시작  (⌃⌥⇧⌘)"
 MAX_TITLE_CHARS = 24
 MAX_MENU_CHARS = 90
 UI_POLL_INTERVAL = 0.1
@@ -95,7 +112,11 @@ class ScreenAnswerApp(rumps.App):
 
         self.result_item = rumps.MenuItem("결과: (없음)", callback=self.on_copy_result)
         self.summary_item = rumps.MenuItem("요약: (없음)", callback=self.on_copy_summary)
+        self.auto_item = rumps.MenuItem(AUTO_OFF_LABEL, callback=self.on_toggle_auto)
         self.key_status_item = rumps.MenuItem("API Key: (미설정)")
+        self.hotkey_status_item = rumps.MenuItem(
+            "단축키: 확인 중…", callback=self.on_hotkey_status
+        )
         self.permissions_menu = rumps.MenuItem("권한 설정 열기")
         for label in PRIVACY_PANES:
             self.permissions_menu.add(rumps.MenuItem(label, callback=self.on_open_privacy))
@@ -103,12 +124,14 @@ class ScreenAnswerApp(rumps.App):
         self.menu = [
             self.result_item,
             self.summary_item,
+            self.auto_item,
             None,
             rumps.MenuItem("API Key 설정…", callback=self.on_set_api_key),
             self.key_status_item,
             self.permissions_menu,
             None,
-            rumps.MenuItem("단축키: ⌃ ⌥ ⌘ (눌렀다 떼기)"),
+            rumps.MenuItem("1회 분석: ⌃⌥⌘  ·  자동 분석: ⌃⌥⇧⌘ (눌렀다 떼기)"),
+            self.hotkey_status_item,
             rumps.MenuItem("초기화(Clear)", callback=self.on_clear),
             rumps.MenuItem("종료(Quit)", callback=self.on_quit),
         ]
@@ -122,6 +145,8 @@ class ScreenAnswerApp(rumps.App):
         self._generation = 0
         self._generation_lock = threading.Lock()
         self._prompt_open = False
+        # 자동 분석 스레드 중지 신호. 켜져 있는 동안에는 set 되지 않은 Event.
+        self._auto_stop: threading.Event | None = None
 
         self._analyzer: Analyzer | None = None
         stored = config.load_api_key()
@@ -137,8 +162,32 @@ class ScreenAnswerApp(rumps.App):
         self._ui_timer.start()
 
         self._hotkey = HotkeyListener(self._on_hotkey)
+        if not has_input_monitoring_access():
+            # 시스템 권한 요청 창을 띄우고 '입력 모니터링' 목록에 앱을 등록한다.
+            request_input_monitoring_access()
         self._hotkey.start()
-        logger.info("준비 완료. Ctrl + Option + Cmd 를 눌렀다 떼면 분석합니다.")
+        self._update_hotkey_status()
+        # 권한이 나중에 허용되거나 macOS가 탭을 꺼 버린 경우를 주기적으로 복구한다.
+        self._hotkey_timer = rumps.Timer(self._hotkey_watchdog, HOTKEY_WATCHDOG_SECONDS)
+        self._hotkey_timer.start()
+        logger.info("준비 완료. ⌃⌥⌘: 1회 분석, ⌃⌥⇧⌘: 5초 자동 분석 토글")
+
+    # ---------- 단축키 상태 ----------
+
+    def _hotkey_watchdog(self, _timer: rumps.Timer) -> None:
+        if self._hotkey.start():
+            self._hotkey.ensure_enabled()
+        self._update_hotkey_status()
+
+    def _update_hotkey_status(self) -> None:
+        if self._hotkey.active:
+            title = "단축키 상태: 정상"
+        elif not has_input_monitoring_access():
+            title = "단축키 상태: ⚠ 입력 모니터링 권한 필요 (클릭)"
+        else:
+            title = "단축키 상태: ⚠ 비활성 — 앱을 재시작하세요 (클릭)"
+        if self.hotkey_status_item.title != title:
+            self.hotkey_status_item.title = title
 
     # ---------- API 키 ----------
 
@@ -259,28 +308,101 @@ class ScreenAnswerApp(rumps.App):
 
     # ---------- 단축키 → 작업 스레드 ----------
 
-    def _on_hotkey(self, x: int, y: int) -> None:
-        """pynput 리스너 스레드에서 호출된다. 즉시 작업 스레드로 넘긴다."""
+    def _on_hotkey(self, action: str, x: int, y: int) -> None:
+        """메인 스레드(이벤트 탭 콜백)에서 호출된다. 무거운 작업은 스레드로 넘긴다."""
+        logger.info("단축키 감지: %s (커서 %d, %d)", action, x, y)
+        if action == ACTION_TOGGLE_AUTO:
+            self._set_auto(not self.auto_running)
+        elif action == ACTION_SINGLE:
+            self._start_single(x, y)
+
+    def _next_generation(self) -> int:
+        with self._generation_lock:
+            self._generation += 1
+            return self._generation
+
+    def _start_single(self, x: int, y: int) -> None:
         analyzer = self._analyzer
         if analyzer is None:
-            self._ui_events.put(("need_key", None))
+            self._prompt_api_key()
             return
         if not self._work_lock.acquire(blocking=False):
             logger.info("이전 분석이 진행 중이라 이번 요청은 무시합니다.")
             return
-        with self._generation_lock:
-            self._generation += 1
-            generation = self._generation
-        threading.Thread(
-            target=self._run_pipeline,
-            args=(analyzer, x, y, generation),
-            name="analyze",
-            daemon=True,
-        ).start()
+        generation = self._next_generation()
 
-    def _run_pipeline(self, analyzer: Analyzer, x: int, y: int, generation: int) -> None:
+        def run() -> None:
+            try:
+                self._analyze_once(analyzer, x, y, generation, auto=False)
+            finally:
+                self._work_lock.release()
+
+        threading.Thread(target=run, name="analyze", daemon=True).start()
+
+    # ---------- 5초 자동 분석 ----------
+
+    @property
+    def auto_running(self) -> bool:
+        return self._auto_stop is not None and not self._auto_stop.is_set()
+
+    def _set_auto(self, enabled: bool) -> None:
+        """메인 스레드에서만 호출한다."""
+        if enabled == self.auto_running:
+            return
+        if enabled:
+            if self._analyzer is None:
+                self._prompt_api_key()
+                return
+            stop = threading.Event()
+            self._auto_stop = stop
+            threading.Thread(
+                target=self._auto_loop, args=(stop,), name="auto-analyze", daemon=True
+            ).start()
+            self.auto_item.title = AUTO_ON_LABEL
+            self.auto_item.state = 1
+            self._revert_at = None
+            self.title = AUTO_IDLE_TITLE
+            logger.info("자동 분석 시작 (%.0f초 간격)", AUTO_INTERVAL_SECONDS)
+        else:
+            if self._auto_stop is not None:
+                self._auto_stop.set()
+            self._auto_stop = None
+            # 진행 중이던 분석 결과가 나중에 도착해도 표시하지 않는다.
+            self._next_generation()
+            self.auto_item.title = AUTO_OFF_LABEL
+            self.auto_item.state = 0
+            self._revert_at = None
+            self.title = IDLE_TITLE if self._analyzer is not None else "⚠ 키 없음"
+            logger.info("자동 분석 중지")
+
+    def _auto_loop(self, stop: threading.Event) -> None:
+        """AUTO_INTERVAL_SECONDS 마다 현재 커서 주변을 캡처해 분석한다(작업 스레드)."""
+        while not stop.is_set():
+            started = time.monotonic()
+            analyzer = self._analyzer
+            if analyzer is None:
+                self._ui_events.put(("auto_off", None))
+                return
+
+            # 1회 분석이 진행 중이면 끝날 때까지 기다린 뒤 실행한다.
+            with self._work_lock:
+                if stop.is_set():
+                    return
+                x, y = get_cursor_position()
+                error = self._analyze_once(analyzer, x, y, self._next_generation(), auto=True)
+
+            wait = AUTO_INTERVAL_SECONDS - (time.monotonic() - started)
+            if error and "429" in error:
+                logger.warning("사용량 한도 초과: %.0f초 쉬고 재시도", AUTO_RATE_LIMIT_BACKOFF_SECONDS)
+                wait = AUTO_RATE_LIMIT_BACKOFF_SECONDS
+            stop.wait(max(0.5, wait))
+
+    def _analyze_once(
+        self, analyzer: Analyzer, x: int, y: int, generation: int, auto: bool
+    ) -> str | None:
+        """캡처 → 분석 → UI 이벤트 전송. 실패 시 오류 메시지를 반환한다."""
         try:
-            self._ui_events.put(("busy", generation))
+            self._ui_events.put(("busy", (generation, auto)))
 
             capture = capture_around_cursor(x, y)
             logger.info(
@@ -296,15 +418,18 @@ class ScreenAnswerApp(rumps.App):
             logger.info(
                 "분석 결과(%s): %s | %s", analysis.answer_type, analysis.result, analysis.summary
             )
-            self._ui_events.put(("result", (generation, analysis.result, analysis.summary)))
+            self._ui_events.put(
+                ("result", (generation, analysis.result, analysis.summary, auto))
+            )
+            return None
         except (AnalyzerError, CaptureError) as exc:
             logger.error("분석 실패: %s", exc)
-            self._ui_events.put(("error", (generation, str(exc))))
+            message = str(exc)
         except Exception as exc:
             logger.exception("파이프라인 오류")
-            self._ui_events.put(("error", (generation, type(exc).__name__)))
-        finally:
-            self._work_lock.release()
+            message = type(exc).__name__
+        self._ui_events.put(("error", (generation, message, auto)))
+        return message
 
     # ---------- 메인 스레드 UI 갱신 ----------
 
@@ -316,7 +441,7 @@ class ScreenAnswerApp(rumps.App):
         # 5초 자동 복귀도 같은 메인 스레드 타이머에서 처리해 UI 접근을 한 곳으로 모은다.
         if self._revert_at is not None and time.monotonic() >= self._revert_at:
             self._revert_at = None
-            self.title = IDLE_TITLE
+            self.title = AUTO_IDLE_TITLE if self.auto_running else IDLE_TITLE
 
         while True:
             try:
@@ -325,18 +450,24 @@ class ScreenAnswerApp(rumps.App):
                 return
 
             if kind == "busy":
-                if self._is_current(payload):  # type: ignore[arg-type]
+                generation, auto = payload  # type: ignore[misc]
+                # 자동 분석 중에는 직전 결과를 그대로 두어 깜빡임을 막는다(첫 회만 '..').
+                if self._is_current(generation) and (
+                    not auto or self.title == AUTO_IDLE_TITLE
+                ):
                     self._revert_at = None
                     self.title = BUSY_TITLE
             elif kind == "result":
-                generation, result, summary = payload  # type: ignore[misc]
+                generation, result, summary, auto = payload  # type: ignore[misc]
                 if self._is_current(generation):
-                    self._show_result(result, summary)
+                    self._show_result(result, summary, auto=auto)
+            elif kind == "auto_off":
+                self._set_auto(False)
+                self._prompt_api_key()
             elif kind == "error":
-                generation, message = payload  # type: ignore[misc]
+                generation, message, auto = payload  # type: ignore[misc]
                 if self._is_current(generation):
-                    self._show_error(message)
-                    self._alert_key_problem(stored, message)
+                    self._show_error(message, auto=auto)
             elif kind == "need_key":
                 self._prompt_api_key()
             elif kind == "key_ok":
@@ -354,24 +485,40 @@ class ScreenAnswerApp(rumps.App):
                     self._show_error(message)
                     self._alert_key_problem(stored, message)
 
-    def _show_result(self, result: str, summary: str) -> None:
+    def _show_result(self, result: str, summary: str, auto: bool = False) -> None:
         self._result_text = result
         self._summary_text = summary
         self.title = _truncate(result, MAX_TITLE_CHARS)
         self.result_item.title = f"결과: {_truncate(result, MAX_MENU_CHARS)}"
         self.summary_item.title = f"요약: {_truncate(summary or '(없음)', MAX_MENU_CHARS)}"
-        self._schedule_revert()
+        # 자동 분석 중에는 다음 결과가 곧 덮어쓰므로 '·' 로 되돌리지 않는다.
+        if auto:
+            self._revert_at = None
+        else:
+            self._schedule_revert()
 
-    def _show_error(self, message: str) -> None:
+    def _show_error(self, message: str, auto: bool = False) -> None:
         self.title = f"⚠ {_truncate(message, MAX_TITLE_CHARS - 2)}"
         self.summary_item.title = f"오류: {_truncate(message, MAX_MENU_CHARS)}"
-        self._schedule_revert()
+        if auto:
+            self._revert_at = None
+        else:
+            self._schedule_revert()
 
     def _schedule_revert(self) -> None:
         """타이틀만 대기 상태로 되돌린다. 드롭다운의 결과/요약은 남겨 다시 확인할 수 있다."""
         self._revert_at = time.monotonic() + RESULT_DISPLAY_SECONDS
 
     # ---------- 메뉴 콜백 ----------
+
+    def on_toggle_auto(self, _sender: rumps.MenuItem) -> None:
+        self._set_auto(not self.auto_running)
+
+    def on_hotkey_status(self, _sender: rumps.MenuItem) -> None:
+        if self._hotkey.active:
+            return
+        request_input_monitoring_access()
+        subprocess.run(["open", PRIVACY_PANES["입력 모니터링"]], check=False)
 
     def on_set_api_key(self, _sender: rumps.MenuItem) -> None:
         self._prompt_api_key()
@@ -399,9 +546,11 @@ class ScreenAnswerApp(rumps.App):
         if self._analyzer is None:
             self._set_missing_key_state()
         else:
-            self.title = IDLE_TITLE
+            self.title = AUTO_IDLE_TITLE if self.auto_running else IDLE_TITLE
 
     def on_quit(self, _sender: rumps.MenuItem) -> None:
+        self._set_auto(False)
+        self._hotkey_timer.stop()
         self._hotkey.stop()
         self._ui_timer.stop()
         rumps.quit_application()
@@ -416,7 +565,9 @@ def _self_test() -> int:
     import mss  # noqa: F401
     from google.genai import types  # noqa: F401
     from PIL import Image  # noqa: F401
-    from pynput import keyboard, mouse  # noqa: F401
+    import Quartz  # noqa: F401
+
+    from hotkey import FLAG_ALTERNATE, FLAG_COMMAND, FLAG_CONTROL, ChordDetector
 
     from analyzer import normalize_result
     from capture import screencapturekit_available
@@ -427,6 +578,17 @@ def _self_test() -> int:
     except AnalyzerError as exc:
         logger.info("가짜 키 확인 요청 → 예상된 거부: %s", exc)
     assert normalize_result("정답: 3번", "choice") == "3"
+    detector = ChordDetector()
+    chord = FLAG_CONTROL | FLAG_ALTERNATE | FLAG_COMMAND
+    assert [detector.on_flags(f) for f in (chord, FLAG_CONTROL, 0)][1] == ACTION_SINGLE
+    listener = HotkeyListener(lambda *_args: None)
+    logger.info(
+        "커서 위치: %s, 입력 모니터링 권한: %s, 이벤트 탭 생성: %s",
+        get_cursor_position(),
+        has_input_monitoring_access(),
+        listener.start(),
+    )
+    listener.stop()
     assert config.CONFIG_DIR.name == ".rubric_gemini"
     assert screencapturekit_available(), "ScreenCaptureKit 모듈이 번들에 없습니다"
     logger.info("SELFTEST OK (python %s, frozen=%s)", sys.version.split()[0], IS_APP_BUNDLE)

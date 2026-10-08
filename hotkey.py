@@ -1,131 +1,208 @@
-"""pynput 기반 전역 단축키(Ctrl + Option + Cmd) 감지 및 커서 좌표 조회.
+"""Quartz CGEventTap 기반 전역 단축키 감지 및 커서 좌표 조회.
 
-수정키만으로 이루어진 조합이라 pynput.keyboard.GlobalHotKeys(일반 키 필요)를
-쓰지 않고, 눌린 수정키 집합을 직접 추적한다.
+단축키 (수정키만 사용, 모두 눌렀다가 떼는 순간 실행):
+  * ⌃ Control + ⌥ Option + ⌘ Command            → 1회 분석
+  * ⌃ Control + ⌥ Option + ⇧ Shift + ⌘ Command  → 5초 자동 분석 켜기/끄기
 
-트리거 규칙:
-  * Ctrl, Option, Cmd 세 키가 모두 눌린 상태가 되면 "조합 완성"으로 본다.
-  * 조합이 완성된 뒤 첫 번째 키를 뗄 때 콜백을 호출한다.
-  * 조합을 누르고 있는 동안 다른 키(예: Ctrl+Option+Cmd+T)가 눌리면
-    다른 앱의 단축키로 간주하고 트리거하지 않는다.
-  * 모든 키를 뗀 뒤에야 다시 트리거할 수 있다(누르고 있는 동안 반복 방지).
+pynput 대신 Quartz를 직접 쓰는 이유:
+  * pynput 키보드 리스너는 백그라운드 스레드에서 키보드 레이아웃(TIS) API를 호출하는데,
+    macOS 14 이후에는 이 API가 메인 스레드 전용이라 리스너가 조용히 죽을 수 있다.
+  * 권한이 없어 이벤트 탭 생성에 실패해도 pynput은 오류 없이 끝나 원인을 알 수 없다.
+  * 콜백이 늦어 macOS가 탭을 비활성화(kCGEventTapDisabledByTimeout)해도 복구하지 않는다.
+여기서는 메인 런루프에 "수신 전용" 탭을 붙이고, 수정키 상태(flags)만 읽으며,
+권한 확인/요청과 탭 자동 재활성화를 직접 처리한다.
+
+수신 전용 탭(kCGEventTapOptionListenOnly)은 '입력 모니터링' 권한이 필요하다.
 """
 
 from __future__ import annotations
 
 import logging
-import threading
+import sys
+from dataclasses import dataclass, field
 from typing import Callable
-
-from pynput import keyboard, mouse
 
 logger = logging.getLogger(__name__)
 
-HotkeyCallback = Callable[[int, int], None]
+ACTION_SINGLE = "single"  # ⌃⌥⌘
+ACTION_TOGGLE_AUTO = "toggle_auto"  # ⌃⌥⇧⌘
 
-_MODIFIER_GROUPS: dict[keyboard.Key, str] = {
-    keyboard.Key.ctrl: "ctrl",
-    keyboard.Key.ctrl_l: "ctrl",
-    keyboard.Key.ctrl_r: "ctrl",
-    keyboard.Key.alt: "alt",
-    keyboard.Key.alt_l: "alt",
-    keyboard.Key.alt_r: "alt",
-    keyboard.Key.alt_gr: "alt",
-    keyboard.Key.cmd: "cmd",
-    keyboard.Key.cmd_l: "cmd",
-    keyboard.Key.cmd_r: "cmd",
-}
+HotkeyCallback = Callable[[str, int, int], None]
 
-REQUIRED_MODIFIERS: frozenset[str] = frozenset({"ctrl", "alt", "cmd"})
+# CGEventFlags 비트 (Quartz 상수와 동일한 값, 순수 로직 테스트용으로 직접 둔다)
+FLAG_SHIFT = 1 << 17
+FLAG_CONTROL = 1 << 18
+FLAG_ALTERNATE = 1 << 19
+FLAG_COMMAND = 1 << 20
+_MODIFIER_MASK = FLAG_SHIFT | FLAG_CONTROL | FLAG_ALTERNATE | FLAG_COMMAND
+_BASE_CHORD = FLAG_CONTROL | FLAG_ALTERNATE | FLAG_COMMAND
+
+
+@dataclass
+class ChordDetector:
+    """수정키 상태 변화를 받아 단축키 동작을 판정하는 순수 상태 기계.
+
+    규칙:
+      * 수정키가 하나라도 눌려 있는 동안을 한 번의 "조합"으로 본다.
+      * 조합 중 가장 많이 눌렸던 수정키 집합(peak)으로 동작을 정한다.
+      * 첫 번째 키를 떼는 순간 발화하고, 모든 키를 뗄 때까지 다시 발화하지 않는다.
+      * 조합 중 일반 키(예: T)가 눌리면 다른 앱 단축키로 보고 취소한다.
+    """
+
+    _peak: int = 0
+    _held: int = 0
+    _dirty: bool = False
+    _fired: bool = field(default=False)
+
+    def on_flags(self, flags: int) -> str | None:
+        held = flags & _MODIFIER_MASK
+        action: str | None = None
+
+        if (held & ~self._held) == 0 and held != self._held:
+            # 키를 뗀 순간(눌린 키가 줄어듦): peak 기준으로 판정
+            if not self._dirty and not self._fired:
+                if self._peak == _BASE_CHORD:
+                    action = ACTION_SINGLE
+                elif self._peak == _BASE_CHORD | FLAG_SHIFT:
+                    action = ACTION_TOGGLE_AUTO
+                if action:
+                    self._fired = True
+        self._peak |= held
+        self._held = held
+
+        if held == 0:
+            self._peak = 0
+            self._dirty = False
+            self._fired = False
+        return action
+
+    def on_key_down(self) -> None:
+        if self._held:
+            self._dirty = True
 
 
 def get_cursor_position() -> tuple[int, int]:
-    """현재 마우스 커서의 전역 좌표(macOS 논리 좌표, 포인트 단위)를 반환한다.
+    """현재 마우스 커서의 전역 좌표(포인트, 주 모니터 좌상단 원점)를 반환한다."""
+    import Quartz
 
-    macOS에서 pynput은 Quartz CGEventGetLocation을 사용하므로 좌표 원점은
-    주 모니터의 좌상단이며, mss의 모니터 좌표계와 동일하다.
-    """
-    x, y = mouse.Controller().position
-    return int(round(x)), int(round(y))
+    event = Quartz.CGEventCreate(None)
+    point = Quartz.CGEventGetLocation(event)
+    return int(round(point.x)), int(round(point.y))
+
+
+def has_input_monitoring_access() -> bool:
+    if sys.platform != "darwin":
+        return False
+    import Quartz
+
+    try:
+        return bool(Quartz.CGPreflightListenEventAccess())
+    except AttributeError:
+        return True
+
+
+def request_input_monitoring_access() -> None:
+    """권한 요청 창을 띄우고, 시스템 설정 '입력 모니터링' 목록에 앱을 등록한다."""
+    import Quartz
+
+    try:
+        Quartz.CGRequestListenEventAccess()
+    except AttributeError:
+        pass
 
 
 class HotkeyListener:
-    """Ctrl + Option + Cmd 조합을 감지해 커서 좌표와 함께 콜백을 호출한다.
+    """메인 런루프에 CGEventTap을 붙여 단축키를 감지한다.
 
-    콜백은 pynput 리스너 스레드에서 호출되므로, 콜백 안에서는 무거운 작업을
-    하지 말고 별도 스레드로 넘겨야 한다.
+    start()/콜백 모두 메인 스레드에서 실행된다. 콜백에서는 무거운 작업을 하지 말고
+    별도 스레드로 넘겨야 한다(늦으면 macOS가 탭을 비활성화한다).
     """
 
     def __init__(self, callback: HotkeyCallback) -> None:
         self._callback = callback
-        self._lock = threading.Lock()
-        self._pressed_modifiers: dict[keyboard.Key, str] = {}
-        self._chord_complete = False
-        self._chord_dirty = False
-        self._listener: keyboard.Listener | None = None
+        self._detector = ChordDetector()
+        self._tap = None
+        self._source = None
+        # PyObjC가 콜백을 GC 하지 않도록 참조를 유지한다.
+        self._tap_callback = self._on_event
 
-    def start(self) -> None:
-        if self._listener is not None:
-            return
-        self._listener = keyboard.Listener(
-            on_press=self._on_press,
-            on_release=self._on_release,
+    @property
+    def active(self) -> bool:
+        if self._tap is None:
+            return False
+        import Quartz
+
+        return bool(Quartz.CGEventTapIsEnabled(self._tap))
+
+    def start(self) -> bool:
+        """탭을 만든다. 권한이 없어 실패하면 False (나중에 다시 호출해 재시도 가능)."""
+        if self._tap is not None:
+            return True
+        import Quartz
+
+        mask = Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged) | Quartz.CGEventMaskBit(
+            Quartz.kCGEventKeyDown
         )
-        self._listener.daemon = True
-        self._listener.start()
-        self._listener.wait()
-        if getattr(self._listener, "IS_TRUSTED", True) is False:
+        tap = Quartz.CGEventTapCreate(
+            Quartz.kCGSessionEventTap,
+            Quartz.kCGHeadInsertEventTap,
+            Quartz.kCGEventTapOptionListenOnly,
+            mask,
+            self._tap_callback,
+            None,
+        )
+        if tap is None:
             logger.warning(
-                "키보드 이벤트 접근 권한이 없습니다. 시스템 설정 > 개인정보 보호 및 보안 > "
-                "'손쉬운 사용'과 '입력 모니터링'에서 이 앱(터미널/Python)을 허용하세요."
+                "단축키 이벤트 탭 생성 실패: '입력 모니터링' 권한이 없거나 아직 적용되지 않았습니다."
             )
+            return False
+
+        source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+        # 메뉴가 열려 있는 동안(이벤트 추적 모드)에도 동작하도록 common modes 에 붙인다.
+        Quartz.CFRunLoopAddSource(Quartz.CFRunLoopGetMain(), source, Quartz.kCFRunLoopCommonModes)
+        Quartz.CGEventTapEnable(tap, True)
+        self._tap, self._source = tap, source
+        logger.info("단축키 감지 시작 (⌃⌥⌘: 1회, ⌃⌥⇧⌘: 자동 분석 토글)")
+        return True
 
     def stop(self) -> None:
-        if self._listener is not None:
-            self._listener.stop()
-            self._listener = None
+        if self._tap is None:
+            return
+        import Quartz
 
-    def _held_groups(self) -> set[str]:
-        return set(self._pressed_modifiers.values())
+        Quartz.CGEventTapEnable(self._tap, False)
+        Quartz.CFRunLoopRemoveSource(
+            Quartz.CFRunLoopGetMain(), self._source, Quartz.kCFRunLoopCommonModes
+        )
+        self._tap = self._source = None
 
-    def _on_press(self, key: keyboard.Key | keyboard.KeyCode | None, *_args) -> None:
-        with self._lock:
-            group = _MODIFIER_GROUPS.get(key) if isinstance(key, keyboard.Key) else None
-            if group is None:
-                # 조합 키 외의 키가 섞이면 다른 단축키로 보고 이번 트리거를 취소한다.
-                if self._pressed_modifiers:
-                    self._chord_dirty = True
-                return
+    def ensure_enabled(self) -> None:
+        """macOS가 탭을 꺼 버린 경우 다시 켠다(주기적으로 호출)."""
+        if self._tap is not None and not self.active:
+            import Quartz
 
-            self._pressed_modifiers[key] = group
-            if self._held_groups() == REQUIRED_MODIFIERS and not self._chord_dirty:
-                self._chord_complete = True
+            logger.warning("단축키 이벤트 탭이 꺼져 있어 다시 켭니다.")
+            Quartz.CGEventTapEnable(self._tap, True)
 
-    def _on_release(self, key: keyboard.Key | keyboard.KeyCode | None, *_args) -> None:
-        fire = False
-        with self._lock:
-            if isinstance(key, keyboard.Key) and key in _MODIFIER_GROUPS:
-                if self._chord_complete and not self._chord_dirty:
-                    fire = True
-                    # 같은 누름 동안 남은 키를 뗄 때 다시 발화하지 않도록 막는다.
-                    self._chord_dirty = True
-                if key in self._pressed_modifiers:
-                    del self._pressed_modifiers[key]
-                else:
-                    # 눌림은 ctrl_l, 뗌은 ctrl처럼 좌/우 구분이 다르게 보고된 경우
-                    # 같은 그룹을 통째로 정리해 키가 "눌린 채" 남지 않게 한다.
-                    group = _MODIFIER_GROUPS[key]
-                    self._pressed_modifiers = {
-                        k: g for k, g in self._pressed_modifiers.items() if g != group
-                    }
+    def _on_event(self, _proxy, event_type, event, _refcon):
+        import Quartz
 
-            if not self._pressed_modifiers:
-                self._chord_complete = False
-                self._chord_dirty = False
+        try:
+            if event_type in (
+                Quartz.kCGEventTapDisabledByTimeout,
+                Quartz.kCGEventTapDisabledByUserInput,
+            ):
+                if self._tap is not None:
+                    Quartz.CGEventTapEnable(self._tap, True)
+                return event
 
-        if fire:
-            try:
-                x, y = get_cursor_position()
-                self._callback(x, y)
-            except Exception:  # 리스너 스레드가 죽지 않도록 모든 예외를 기록만 한다.
-                logger.exception("단축키 콜백 처리 중 오류가 발생했습니다.")
+            if event_type == Quartz.kCGEventKeyDown:
+                self._detector.on_key_down()
+            elif event_type == Quartz.kCGEventFlagsChanged:
+                action = self._detector.on_flags(int(Quartz.CGEventGetFlags(event)))
+                if action:
+                    point = Quartz.CGEventGetLocation(event)
+                    self._callback(action, int(round(point.x)), int(round(point.y)))
+        except Exception:  # 콜백 예외로 탭이 멈추지 않도록 기록만 한다.
+            logger.exception("단축키 처리 중 오류")
+        return event

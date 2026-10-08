@@ -35,15 +35,15 @@ def main() -> int:
     if args.x is not None and args.y is not None:
         x, y = args.x, args.y
     else:
-        from pynput import mouse
+        from hotkey import get_cursor_position
 
-        x, y = (int(v) for v in mouse.Controller().position)
+        x, y = get_cursor_position()
 
     print(f"macOS: {sys.platform}, 커서=({x}, {y})")
     print(f"화면 기록 권한(CGPreflightScreenCaptureAccess): {capture.has_screen_capture_access()}")
     print(f"ScreenCaptureKit 사용 가능: {capture.screencapturekit_available()}")
 
-    region = capture._find_region(x, y, capture.CAPTURE_WIDTH, capture.CAPTURE_HEIGHT)
+    region = capture._find_region(x, y)
     print(f"캡처 영역(pt): {region}")
 
     results: dict[str, Image.Image] = {}

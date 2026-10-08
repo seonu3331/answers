@@ -10,7 +10,7 @@ from pathlib import Path
 from setuptools import setup
 
 APP_NAME = "ScreenAnswer"
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 BUNDLE_ID = "com.rubric.screenanswer"
 ICON = Path("assets/ScreenAnswer.icns")
 
@@ -46,7 +46,7 @@ OPTIONS = {
         "websockets",
         "PIL",
         "mss",
-        "pynput",
+        "Quartz",
         "rumps",
         "ScreenCaptureKit",
         "dotenv",

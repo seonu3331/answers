@@ -1,6 +1,6 @@
 google-genai>=1.0.0
 rumps>=0.4.0
-pynput>=1.8.1
+pyobjc-framework-Quartz>=10.3; sys_platform == "darwin"
 mss>=9.0.1
 Pillow>=10.0.0
 python-dotenv>=1.0.0

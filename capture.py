@@ -1,7 +1,7 @@
 """마우스 커서 중심 화면 캡처 및 Retina 배율 보정.
 
 좌표계 정리 (macOS):
-  * pynput 커서 좌표와 mss 모니터 좌표는 모두 "포인트(논리 좌표)" 단위이며,
+  * 커서 좌표(Quartz CGEventGetLocation)와 mss 모니터 좌표는 모두 "포인트(논리 좌표)" 단위이며,
     주 모니터 좌상단이 원점인 같은 전역 좌표계를 쓴다.
   * 실제로 받아오는 이미지의 픽셀 수는 mss 버전/디스플레이에 따라
     논리 해상도(1x)일 수도, Retina 물리 해상도(2x 등)일 수도 있다.
@@ -30,8 +30,13 @@ from PIL import Image, ImageDraw
 
 logger = logging.getLogger(__name__)
 
-CAPTURE_WIDTH = 800
-CAPTURE_HEIGHT = 600
+# 캡처 영역: 커서가 있는 모니터 크기 대비 비율.
+# MacBook Pro 14" 기본 해상도(1512x982pt) 기준 약 1008x884pt (가로 2/3, 세로 대부분).
+CAPTURE_WIDTH_RATIO = 2 / 3
+CAPTURE_HEIGHT_RATIO = 0.9
+# 업로드 이미지 최대 배율. 영역이 커졌으므로 Retina 2x 원본을 1.5x로 줄여
+# 글자 판독성은 유지하면서 업로드 크기와 지연 시간을 줄인다.
+MAX_OUTPUT_SCALE = 1.5
 SCK_TIMEOUT_SECONDS = 5.0
 
 
@@ -218,10 +223,18 @@ def _grab_mss(region: dict[str, int]) -> Image.Image:
         return Image.frombytes("RGB", shot.size, shot.rgb)
 
 
-def _find_region(x: int, y: int, width: int, height: int) -> dict[str, int]:
+def _find_region(
+    x: int,
+    y: int,
+    width_ratio: float = CAPTURE_WIDTH_RATIO,
+    height_ratio: float = CAPTURE_HEIGHT_RATIO,
+) -> dict[str, int]:
+    """커서가 있는 모니터를 찾아, 모니터 크기 비율만큼의 영역을 커서 중심으로 잡는다."""
     # mss 인스턴스는 스레드 간 공유가 안전하지 않으므로 호출마다 새로 만든다.
     with mss.mss() as sct:
         mon = _find_monitor(sct.monitors, x, y)
+    width = max(1, round(mon["width"] * width_ratio))
+    height = max(1, round(mon["height"] * height_ratio))
     return _region_around(mon, x, y, width, height)
 
 
@@ -238,9 +251,9 @@ def grab_region(region: dict[str, int], x: int, y: int) -> tuple[Image.Image, st
 def capture_around_cursor(
     x: int,
     y: int,
-    width: int = CAPTURE_WIDTH,
-    height: int = CAPTURE_HEIGHT,
-    max_output_scale: float = 2.0,
+    width_ratio: float = CAPTURE_WIDTH_RATIO,
+    height_ratio: float = CAPTURE_HEIGHT_RATIO,
+    max_output_scale: float = MAX_OUTPUT_SCALE,
 ) -> CaptureResult:
     """커서 (x, y)를 중심으로 width x height(포인트) 영역을 캡처해 PNG 바이트로 반환한다.
 
@@ -252,7 +265,7 @@ def capture_around_cursor(
         request_screen_capture_access()
         raise CaptureError("화면 기록 권한 필요")
 
-    region = _find_region(x, y, width, height)
+    region = _find_region(x, y, width_ratio, height_ratio)
     image, backend = grab_region(region, x, y)
 
     # Retina 배율 보정: 요청 영역(포인트) 대비 실제 픽셀 수로 배율을 계산한다.
