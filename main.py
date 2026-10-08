@@ -2,8 +2,8 @@
 
 실행: python main.py  (또는 build_app.sh 로 만든 ScreenAnswer.app 더블 클릭)
 단축키 (수정키를 함께 눌렀다 떼면 실행):
-  * ⌃ Control + ⌥ Option + ⌘ Command            → 커서 주변 1회 분석
-  * ⌃ Control + ⌥ Option + ⇧ Shift + ⌘ Command  → 5초마다 자동 분석 켜기/끄기
+  * ⌃ Control + ⌥ Option + ⌘ Command      → 커서 주변 1회 분석
+  * ⌃ Control + ⌥ Option + ⌘ Command + A  → 5초마다 자동 분석 켜기/끄기
     (메뉴의 '5초 자동 분석'으로도 켜고 끌 수 있다)
 
 메뉴바 표시: '·' 대기 → '..' 분석 중 → '3' 결과 (1회 분석은 5초 후 '·' 복귀,
@@ -52,8 +52,8 @@ RESULT_DISPLAY_SECONDS = 5.0
 AUTO_INTERVAL_SECONDS = 5.0
 AUTO_RATE_LIMIT_BACKOFF_SECONDS = 30.0
 HOTKEY_WATCHDOG_SECONDS = 3.0
-AUTO_ON_LABEL = "5초 자동 분석 중지  (⌃⌥⇧⌘)"
-AUTO_OFF_LABEL = "5초 자동 분석 시작  (⌃⌥⇧⌘)"
+AUTO_ON_LABEL = "5초 자동 분석 중지  (⌃⌥⌘A)"
+AUTO_OFF_LABEL = "5초 자동 분석 시작  (⌃⌥⌘A)"
 MAX_TITLE_CHARS = 24
 MAX_MENU_CHARS = 90
 UI_POLL_INTERVAL = 0.1
@@ -153,7 +153,7 @@ class ScreenAnswerApp(rumps.App):
             self.key_status_item,
             self.permissions_menu,
             None,
-            rumps.MenuItem("1회 분석: ⌃⌥⌘  ·  자동 분석: ⌃⌥⇧⌘ (눌렀다 떼기)"),
+            rumps.MenuItem("1회 분석: ⌃⌥⌘ 눌렀다 떼기  ·  자동 분석 켜기/끄기: ⌃⌥⌘A"),
             self.hotkey_status_item,
             rumps.MenuItem("초기화(Clear)", callback=self.on_clear),
             rumps.MenuItem("종료(Quit)", callback=self.on_quit),
@@ -196,7 +196,7 @@ class ScreenAnswerApp(rumps.App):
         # 권한이 나중에 허용되거나 macOS가 탭을 꺼 버린 경우를 주기적으로 복구한다.
         self._hotkey_timer = rumps.Timer(self._hotkey_watchdog, HOTKEY_WATCHDOG_SECONDS)
         self._hotkey_timer.start()
-        logger.info("준비 완료. ⌃⌥⌘: 1회 분석, ⌃⌥⇧⌘: 5초 자동 분석 토글")
+        logger.info("준비 완료. ⌃⌥⌘: 1회 분석, ⌃⌥⌘A: 5초 자동 분석 토글")
 
     # ---------- 단축키 상태 ----------
 
@@ -729,7 +729,7 @@ def _self_test() -> int:
     from PIL import Image  # noqa: F401
     import Quartz  # noqa: F401
 
-    from hotkey import FLAG_ALTERNATE, FLAG_COMMAND, FLAG_CONTROL, ChordDetector
+    from hotkey import FLAG_ALTERNATE, FLAG_COMMAND, FLAG_CONTROL, FLAG_SHIFT, KEYCODE_A, ChordDetector
 
     from analyzer import normalize_result
     from capture import screencapturekit_available
@@ -743,6 +743,13 @@ def _self_test() -> int:
     detector = ChordDetector()
     chord = FLAG_CONTROL | FLAG_ALTERNATE | FLAG_COMMAND
     assert [detector.on_flags(f) for f in (chord, FLAG_CONTROL, 0)][1] == ACTION_SINGLE
+    # ⌃⌥⌘A → 토글 1회, 키 반복은 무시, 이후 수정키를 떼도 1회 분석은 발화하지 않음
+    detector.on_flags(chord)
+    assert detector.on_key_down(KEYCODE_A, chord) == ACTION_TOGGLE_AUTO
+    assert detector.on_key_down(KEYCODE_A, chord, autorepeat=True) is None
+    assert [detector.on_flags(f) for f in (FLAG_CONTROL, 0)] == [None, None]
+    assert detector.on_key_down(KEYCODE_A, chord | FLAG_SHIFT) is None
+    assert normalize_result("B", "choice") == "2" and normalize_result("(d)", "text") == "4"
     listener = HotkeyListener(lambda *_args: None)
     logger.info(
         "커서 위치: %s, 입력 모니터링 권한: %s, 이벤트 탭 생성: %s",

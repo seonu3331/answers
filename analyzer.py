@@ -11,7 +11,28 @@ from google import genai
 from google.genai import errors, types
 from pydantic import BaseModel, Field, ValidationError
 
-DEFAULT_MODEL = "gemini-2.5-flash"
+
+def _fix_ssl_cert_env() -> None:
+    """py2app 번들의 부트 코드는 SSL_CERT_FILE/SSL_CERT_DIR을 '.../openssl.ca/no-such-file'로
+    설정한다. google-genai는 이 값을 certifi보다 우선해 ssl.create_default_context()에 넘기므로
+    FileNotFoundError([Errno 2])로 클라이언트 생성이 실패한다. 존재하지 않는 경로는 지우고
+    certifi 번들을 쓰게 한다."""
+    for name in ("SSL_CERT_FILE", "SSL_CERT_DIR"):
+        path = os.environ.get(name)
+        if path and not os.path.exists(path):
+            del os.environ[name]
+    if "SSL_CERT_FILE" not in os.environ:
+        try:
+            import certifi
+
+            os.environ["SSL_CERT_FILE"] = certifi.where()
+        except Exception:  # certifi가 없으면 google-genai의 기본 동작에 맡긴다.
+            pass
+
+
+_fix_ssl_cert_env()
+
+DEFAULT_MODEL = "gemini-3.1-flash-lite"
 
 SYSTEM_PROMPT = """\
 이미지 내 마우스 커서 주변의 텍스트나 질문을 빠르게 분석하세요.
@@ -20,7 +41,8 @@ SYSTEM_PROMPT = """\
 규칙:
 1. 번호가 붙은 객관식 문제나 선택지가 있는 경우: answer_type은 "choice"로 하고,
    result에는 가장 타당한 선택지 번호를 아라비아 숫자 하나로만 쓰세요. (예: "3")
-   번호 대신 알파벳 등으로 구분된 선택지라면 그 기호나 핵심 키워드를 쓰세요. (예: "B")
+   선택지가 알파벳(A, B, C, D, E)이나 한글(ㄱ, ㄴ, ㄷ / 가, 나, 다)로 구분돼 있으면
+   순서대로 1, 2, 3, 4, 5로 바꿔 숫자로 쓰세요. (예: B → "2", ㄷ → "3")
 2. 주관식/단답형인 경우: answer_type은 "text"로 하고, 1~3단어 이내의 핵심 정답을 추출하세요.
 3. 질문이 아닌 일반 텍스트인 경우: answer_type은 "text"로 하고, 핵심 키워드를 1~3단어로 추출하세요.
 4. 판독할 수 있는 내용이 없으면 answer_type은 "text", result는 "인식 불가"로 하세요.
@@ -45,6 +67,29 @@ _CIRCLED_DIGITS = str.maketrans(
     }
 )
 
+# 알파벳/한글 선택지 기호 → 아라비아 숫자 (A=1 … E=5)
+_LETTER_CHOICES = {
+    **{c: str(i) for i, c in enumerate("ABCDE", start=1)},
+    **{c: str(i) for i, c in enumerate("abcde", start=1)},
+    **{c: str(i) for i, c in enumerate("ＡＢＣＤＥ", start=1)},
+    **{c: str(i) for i, c in enumerate("ㄱㄴㄷㄹㅁ", start=1)},
+    **{c: str(i) for i, c in enumerate("가나다라마", start=1)},
+}
+_LETTER_CLASS = "".join(_LETTER_CHOICES)
+
+# 선택지 기호 단독 또는 기호 뒤에 구분자가 오는 형태: "B", "(B)", "B.", "B)", "B번", "B 광합성", "정답: B"
+# "Apple", "가방" 같은 단어의 첫 글자는 건드리지 않는다.
+_LETTER_CHOICE_PATTERN = re.compile(
+    rf"^(?:(?:정답|답|answer)\s*(?:은|는|[:：])?\s*)?[(\[]?([{_LETTER_CLASS}])(?:[)\].]|\s*번|\s|$)",
+    re.IGNORECASE,
+)
+
+
+def _letter_choice_number(text: str) -> str | None:
+    match = _LETTER_CHOICE_PATTERN.match(text)
+    return _LETTER_CHOICES[match.group(1)] if match else None
+
+
 # 객관식: 다른 숫자에 붙어 있지 않은 맨 앞의 1~5 한 자리 ("정답: 3", "3번", "(3) 광합성")
 _FIRST_CHOICE_DIGIT = re.compile(r"(?<!\d)([1-5])(?!\d)")
 
@@ -58,7 +103,8 @@ _EXPLICIT_CHOICE_PATTERNS = (
 
 
 def normalize_result(raw: str, answer_type: AnswerType) -> str:
-    """객관식 정답을 숫자 한 자리('1'~'5')로 정규화한다. 해당 없으면 원문을 정리해 반환."""
+    """객관식 정답을 숫자 한 자리('1'~'5')로 정규화한다(알파벳·한글 기호도 숫자로).
+    해당 없으면 원문을 정리해 반환."""
     text = " ".join(raw.translate(_CIRCLED_DIGITS).split())
     if not text:
         return "인식 불가"
@@ -67,12 +113,15 @@ def normalize_result(raw: str, answer_type: AnswerType) -> str:
         match = _FIRST_CHOICE_DIGIT.search(text)
         if match:
             return match.group(1)
-        return text  # "B"처럼 숫자가 아닌 선택지 기호
+        return _letter_choice_number(text) or text
 
     for pattern in _EXPLICIT_CHOICE_PATTERNS:
         match = pattern.match(text)
         if match:
             return match.group(1)
+    # 주관식으로 분류됐어도 선택지 기호 단독("B", "(B)", "B번")이면 숫자로 바꾼다.
+    if re.fullmatch(rf"[(\[]?[{_LETTER_CLASS}][)\].]?\s*번?", text):
+        return _letter_choice_number(text) or text
     return text
 
 
@@ -163,7 +212,7 @@ class Analyzer:
             response_mime_type="application/json",
             response_schema=AnalysisResult,
             temperature=0.2,
-            max_output_tokens=256,
+            max_output_tokens=2048,
             # 저지연을 위해 사고(thinking) 토큰을 끈다.
             thinking_config=types.ThinkingConfig(thinking_budget=0),
         )
