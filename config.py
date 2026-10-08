@@ -29,9 +29,20 @@ KEYCHAIN_ACCOUNT = "GEMINI_API_KEY"
 CONFIG_DIR = Path.home() / ".rubric_gemini"
 CONFIG_FILE = CONFIG_DIR / "config.json"
 
-# Google API 키는 영숫자와 '-', '_'로 구성된다. 공백/따옴표가 섞이지 않음을 보장해
-# security -i 명령 문자열에 안전하게 넣을 수 있게 한다.
-_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_\-]{20,200}$")
+# Gemini API 키 형식:
+#   * 기존 키: "AIza..." (영숫자, '-', '_', 39자)
+#   * 2026년부터 AI Studio가 발급하는 새 키: "AQ.Ab..." ('.' 포함, 더 김)
+# 형식이 계속 바뀔 수 있으므로 접두사/길이를 고정하지 않고, 공백·따옴표·역슬래시가 없는
+# 출력 가능한 ASCII 문자열이면 허용한다. 실제 유효성은 저장 후 API 호출로 확인한다.
+# (공백/따옴표가 없어야 security -i 명령 문자열에 안전하게 넣을 수 있다.)
+_KEY_PATTERN = re.compile(r"^[\x21-\x7e]+$")
+_FORBIDDEN_CHARS = set("\"'`\\")
+_MIN_KEY_LENGTH = 20
+_MAX_KEY_LENGTH = 512
+
+# 복사/붙여넣기 과정에서 섞이기 쉬운 보이지 않는 문자
+_INVISIBLE_CHARS = dict.fromkeys(map(ord, "\u200b\u200c\u200d\u2060\ufeff\u00ad"), None)
+_SURROUNDING_QUOTES = "\"'`“”‘’"
 
 
 class StoredKey(NamedTuple):
@@ -40,10 +51,24 @@ class StoredKey(NamedTuple):
 
 
 def normalize_key(raw: str) -> str:
-    """입력값을 정리하고 형식을 검사한다. 형식이 틀리면 ValueError."""
-    key = raw.strip().strip('"').strip("'").strip()
-    if not _KEY_PATTERN.fullmatch(key):
-        raise ValueError("API 키 형식이 올바르지 않습니다. (영문/숫자/-/_ 20자 이상)")
+    """입력값을 정리하고 형식을 검사한다. 형식이 틀리면 원인을 담은 ValueError."""
+    key = raw.translate(_INVISIBLE_CHARS)
+    # 키에는 공백이 없으므로, 줄바꿈 등으로 중간에 끼어든 공백까지 모두 제거한다.
+    key = "".join(key.split()).strip(_SURROUNDING_QUOTES)
+
+    if not key:
+        raise ValueError("입력된 키가 없습니다. 키를 붙여넣었는지 확인하세요.")
+
+    bad = sorted({c for c in key if c in _FORBIDDEN_CHARS or not _KEY_PATTERN.fullmatch(c)})
+    if bad:
+        shown = " ".join(f"U+{ord(c):04X}" if not c.isprintable() else repr(c) for c in bad[:5])
+        raise ValueError(f"키에 사용할 수 없는 문자가 있습니다: {shown}")
+
+    if not _MIN_KEY_LENGTH <= len(key) <= _MAX_KEY_LENGTH:
+        raise ValueError(
+            f"키 길이가 올바르지 않습니다({len(key)}자). "
+            "AI Studio에서 키 전체를 다시 복사해 붙여넣으세요."
+        )
     return key
 
 

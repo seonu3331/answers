@@ -120,11 +120,34 @@ def _parse_json_text(text: str | None) -> AnalysisResult:
     raise AnalyzerError("JSON 파싱 실패")
 
 
+# Google API 오류 응답의 ErrorInfo.reason → 메뉴바에 표시할 짧은 메시지
+_ERROR_REASONS = {
+    "API_KEY_INVALID": "API 키 오류",
+    "ACCESS_TOKEN_TYPE_UNSUPPORTED": "키 유형 거부(AQ)",
+    "API_KEY_SERVICE_BLOCKED": "키에 Gemini 미허용",
+    "SERVICE_DISABLED": "Gemini API 비활성",
+    "RATE_LIMIT_EXCEEDED": "사용량 초과(429)",
+}
+
+
+def error_reason(exc: errors.APIError) -> str | None:
+    """오류 응답 details 에서 ErrorInfo.reason 값을 찾는다."""
+    details = exc.details if isinstance(exc.details, dict) else {}
+    error = details.get("error", details)
+    for item in error.get("details", []) if isinstance(error, dict) else []:
+        if isinstance(item, dict) and item.get("reason"):
+            return str(item["reason"])
+    return None
+
+
 def _api_error_message(exc: errors.APIError) -> str:
-    if exc.code in (400, 401, 403) and "API key" in (exc.message or ""):
-        return "API 키 오류"
+    reason = error_reason(exc)
+    if reason in _ERROR_REASONS:
+        return _ERROR_REASONS[reason]
     if exc.code == 429:
         return "사용량 초과(429)"
+    if exc.code in (400, 401, 403) and "API key" in (exc.message or ""):
+        return "API 키 오류"
     return f"API 오류 {exc.code}"
 
 

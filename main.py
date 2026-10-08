@@ -154,7 +154,7 @@ class ScreenAnswerApp(rumps.App):
         try:
             message = (
                 "Google AI Studio(aistudio.google.com)에서 발급한 Gemini API 키를 붙여넣으세요.\n"
-                "키는 macOS Keychain에 저장됩니다."
+                "(AIza… 또는 AQ.… 형식 모두 가능, 키는 macOS Keychain에 저장됩니다)"
             )
             if first_run:
                 message = "처음 실행하셨네요. " + message
@@ -219,9 +219,37 @@ class ScreenAnswerApp(rumps.App):
             analyzer.verify()
             self._ui_events.put(("key_ok", (analyzer, stored)))
         except AnalyzerError as exc:
+            logger.error("API 키 확인 실패: %s (원인: %r)", exc, exc.__cause__)
             self._ui_events.put(("key_bad", (analyzer, stored, str(exc))))
         except Exception as exc:  # 네트워크 오류 등
             self._ui_events.put(("key_bad", (analyzer, stored, type(exc).__name__)))
+
+    def _alert_key_problem(self, stored: config.StoredKey, message: str) -> None:
+        """키 확인 실패 시 원인과 해결 방법을 알려 준다."""
+        hints = {
+            "API 키 오류": "키가 잘못되었거나 삭제되었습니다. AI Studio에서 키를 다시 복사해 주세요.",
+            "키 유형 거부(AQ)": (
+                "Google 서버가 이 키를 API 키가 아닌 인증 토큰으로 처리해 거부했습니다.\n"
+                "AI Studio의 'Get API key'에서 새 키를 다시 만들거나, Google Cloud 콘솔 → "
+                "API 및 서비스 → 사용자 인증 정보에서 'Generative Language API'로 제한한 "
+                "API 키(AIza…)를 만들어 입력해 보세요."
+            ),
+            "키에 Gemini 미허용": (
+                "이 키는 Gemini API(Generative Language API) 사용이 제한되어 있습니다. "
+                "Google Cloud 콘솔에서 키의 API 제한에 Generative Language API를 추가하세요."
+            ),
+            "Gemini API 비활성": "해당 프로젝트에서 Generative Language API를 사용 설정하세요.",
+        }
+        _bring_app_to_front()
+        rumps.alert(
+            title=f"API 키 확인 실패: {message}",
+            message=(
+                f"키: {config.mask_key(stored.key)} ({len(stored.key)}자, {stored.source})\n\n"
+                + hints.get(message, "네트워크 상태를 확인하고 'API Key 설정…'에서 다시 시도하세요.")
+                + f"\n\n자세한 로그: {LOG_FILE}"
+            ),
+            ok="확인",
+        )
 
     def _set_missing_key_state(self) -> None:
         self._analyzer = None
@@ -308,6 +336,7 @@ class ScreenAnswerApp(rumps.App):
                 generation, message = payload  # type: ignore[misc]
                 if self._is_current(generation):
                     self._show_error(message)
+                    self._alert_key_problem(stored, message)
             elif kind == "need_key":
                 self._prompt_api_key()
             elif kind == "key_ok":
@@ -323,6 +352,7 @@ class ScreenAnswerApp(rumps.App):
                         f"API Key: {config.mask_key(stored.key)} ({stored.source}) · {message}"
                     )
                     self._show_error(message)
+                    self._alert_key_problem(stored, message)
 
     def _show_result(self, result: str, summary: str) -> None:
         self._result_text = result
