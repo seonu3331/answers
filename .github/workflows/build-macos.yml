@@ -1,0 +1,67 @@
+name: Build macOS app
+
+on:
+  push:
+    branches: ["claude/admiring-hamilton-elmi1h", "main"]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15        # Apple Silicon (M1~)
+            arch: arm64
+          - runner: macos-15-intel  # Intel Mac
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    name: build (${{ matrix.arch }})
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Build .app
+        run: PYTHON=python ./build_app.sh
+
+      - name: Self-test bundled app
+        run: |
+          SCREENANSWER_SELFTEST=1 dist/ScreenAnswer.app/Contents/MacOS/ScreenAnswer
+          codesign --verify --deep --strict dist/ScreenAnswer.app
+          file dist/ScreenAnswer.app/Contents/MacOS/ScreenAnswer
+
+      - name: Package .dmg
+        run: ./make_dmg.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ScreenAnswer-${{ matrix.arch }}
+          path: dist/*.dmg
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" artifacts/*.dmg \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "ScreenAnswer ${GITHUB_REF_NAME}" \
+            --notes "Apple Silicon(M1 이상): *-arm64.dmg / Intel Mac: *-x86_64.dmg"

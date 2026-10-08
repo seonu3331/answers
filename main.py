@@ -12,6 +12,7 @@ Dock 아이콘이 보이는 일반 앱으로 동작하므로(LSUIElement=False) 
 from __future__ import annotations
 
 import logging
+import os
 import queue
 import subprocess
 import sys
@@ -375,7 +376,29 @@ class ScreenAnswerApp(rumps.App):
         rumps.quit_application()
 
 
+def _self_test() -> int:
+    """빌드된 .app 안에 필요한 모듈이 모두 들어갔는지 확인한다 (CI에서 사용).
+
+    SCREENANSWER_SELFTEST=1 로 실행하면 UI를 띄우지 않고 확인 후 종료한다.
+    """
+    import AppKit  # noqa: F401  (rumps/pyobjc)
+    import mss  # noqa: F401
+    from google.genai import types  # noqa: F401
+    from PIL import Image  # noqa: F401
+    from pynput import keyboard, mouse  # noqa: F401
+
+    from analyzer import normalize_result
+
+    Analyzer(api_key="AIzaSySELFTEST_000000000000000000")
+    assert normalize_result("정답: 3번", "choice") == "3"
+    assert config.CONFIG_DIR.name == ".rubric_gemini"
+    logger.info("SELFTEST OK (python %s, frozen=%s)", sys.version.split()[0], IS_APP_BUNDLE)
+    return 0
+
+
 def main() -> None:
+    if os.environ.get("SCREENANSWER_SELFTEST") == "1":
+        sys.exit(_self_test())
     ScreenAnswerApp().run()
 
 
