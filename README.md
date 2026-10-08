@@ -1,14 +1,17 @@
 # ScreenAnswer — 커서 기반 화면 분석 메뉴바 앱 (macOS)
 
+> 현재 버전: **v1.4.0** — 변경 내역은 맨 아래 [변경 내역](#변경-내역)을 참고하세요.
+
 `Ctrl + Option + Cmd`를 눌렀다 떼면 마우스 커서 주변(화면 가로 2/3 × 세로 90%)을 캡처해
-Gemini(`gemini-2.5-flash`)로 분석하고, 결과를 메뉴바에 짧게 표시합니다.
-`Ctrl + Option + Shift + Cmd`로는 5초마다 자동으로 분석하는 모드를 켜고 끕니다.
+Gemini(`gemini-3.1-flash-lite`)로 분석하고, 결과를 메뉴바에 짧게 표시합니다.
+`Ctrl + Option + Cmd`를 누른 채 `A`를 누르면 5초마다 자동으로 분석하는 모드를 켜고 끕니다.
+객관식 답은 선택지가 A/B/C나 ㄱ/ㄴ/ㄷ로 되어 있어도 **항상 아라비아 숫자(1~5)** 로 표시합니다.
 
 | 상태 | 메뉴바 표시 |
 | --- | --- |
 | 대기 | `·` |
 | 분석 중 | `..` |
-| 결과 | `3` (객관식은 숫자 1개, 주관식은 1~3단어) → **5초 후 자동으로 `·` 복귀** |
+| 결과 | `3` (객관식은 숫자 1개 — 알파벳·한글 선택지도 숫자로, 주관식은 1~3단어) → **5초 후 자동으로 `·` 복귀** |
 | 자동 분석 시작 직후 | `↻` → 이후 결과가 5초마다 갱신(복귀 없이 유지) |
 | 오류 | `⚠ API 키 오류` 등 → 5초 후 복귀 |
 
@@ -45,7 +48,9 @@ Python 3.12를 설치합니다. 둘 중 하나를 고르세요.
 - [python.org](https://www.python.org/downloads/macos/)의 macOS 64-bit universal2 설치 파일 (**권장**)
 - Homebrew: `brew install python@3.12`
 
-macOS 기본 `/usr/bin/python3`(3.9)는 너무 오래돼서 쓰면 안 됩니다. 버전을 확인하세요.
+macOS 기본 `/usr/bin/python3`(3.9)는 너무 오래돼서 쓰면 안 됩니다.
+**Anaconda/Miniconda(conda) Python으로 빌드하면 앱 실행 시 `libffi` 오류가 납니다.** 터미널 프롬프트에
+`(base)`가 보이면 `PYTHON=python3.12`처럼 python.org/Homebrew Python을 명시하세요. 버전을 확인하세요.
 ```bash
 python3.12 --version            # Python 3.12.x
 ```
@@ -105,7 +110,7 @@ python main.py
 | --- | --- |
 | 입력 모니터링 | 전역 단축키 감지 (Quartz 이벤트 탭) |
 | 손쉬운 사용 | (권장) 일부 macOS 버전에서 단축키 감지에 필요 |
-| 화면 기록 | 화면 캡처 (mss). 없으면 바탕화면만 찍힘 |
+| 화면 기록 | 화면 캡처 (ScreenCaptureKit, 대체 mss). 없으면 바탕화면만 찍힘 |
 
 권한을 바꾼 뒤에는 앱을 다시 시작하세요(메뉴 `종료(Quit)` 후 다시 실행).
 화면 기록 권한이 없으면 메뉴바에 `⚠ 화면 기록 권한 필요`가 표시됩니다.
@@ -121,13 +126,16 @@ python main.py
 | 동작 | 방법 |
 | --- | --- |
 | 1회 분석 | `⌃ Control + ⌥ Option + ⌘ Command` 를 함께 눌렀다 떼기 |
-| 5초 자동 분석 켜기/끄기 | `⌃ Control + ⌥ Option + ⌘ Command` 를 누른 채 `A`, 또는 메뉴 **5초 자동 분석 시작/중지** |
+| 5초 자동 분석 켜기/끄기 | `⌃ Control + ⌥ Option + ⌘ Command` 를 누른 채 `A` (`⌃⌥⌘A`), 또는 메뉴 **5초 자동 분석 시작/중지** |
 
 - 캡처 영역: 커서가 있는 모니터의 **가로 2/3 × 세로 90%** (MacBook Pro 14" 기본 해상도 기준 약 1008×884pt),
   커서를 중심으로 잡고 화면 밖으로 나가면 안쪽으로 밀어 넣습니다.
 - 자동 분석은 매 회차마다 **그 순간의 커서 위치**를 기준으로 캡처합니다. 이전 분석이 끝나지 않았으면 끝난 뒤 실행합니다.
 - 자동 분석은 분당 약 12회 API를 호출합니다. 무료 등급 한도를 넘으면 `⚠ 사용량 초과(429)`가 뜨고 30초 쉬었다가 재개합니다.
-- 조합 중 다른 키를 함께 누르면(다른 앱 단축키) 실행되지 않습니다.
+- `⌃⌥⌘A`는 A를 누르는 순간 한 번만 토글됩니다(길게 눌러도 반복되지 않음). 키 위치 기준이라 한글 입력 상태(ㅁ)에서도 동작합니다.
+- v1.3까지 쓰던 `⌃⌥⇧⌘`(네 키) 조합은 Raycast·Karabiner 등의 'Hyper 키'와 겹쳐 v1.4.0에서 `⌃⌥⌘A`로 바꿨습니다.
+  `⌃⌥⌘` + 글자 조합은 macOS 기본 단축키에 없습니다.
+- 1회 분석 조합 중 A 외의 다른 키를 함께 누르면(다른 앱 단축키) 실행되지 않습니다.
 - 드롭다운에서 마지막 결과·요약을 다시 볼 수 있고, 클릭하면 클립보드에 복사됩니다.
 
 ### 단축키가 반응하지 않을 때
@@ -146,15 +154,41 @@ python main.py
    **앱을 업데이트할 때마다 한 번씩** 필요합니다. 앱 실행 시 이 상태를 감지하면 안내 창이 뜹니다.
 3. 그래도 안 되면 메뉴 **권한 설정 열기 → 진단 정보 복사** 결과와 `~/Library/Logs/ScreenAnswer.log`를 확인합니다.
 
+### 메뉴에 `API Key: 초기화 실패 ([Errno 2] No such file or directory)`가 뜰 때
+
+v1.3.1 이하로 빌드한 앱에서 생기던 문제로, **v1.4.0에서 고쳐졌습니다.** 다시 빌드·설치하세요.
+(py2app 번들이 `SSL_CERT_FILE`/`SSL_CERT_DIR`을 존재하지 않는 경로로 설정해 google-genai 클라이언트 생성이
+실패하던 것으로, 키 자체는 정상입니다.)
+
+### `⚠ API 오류 503`이 뜰 때
+
+Google 서버에서 해당 모델이 일시적으로 과부하인 상태입니다(키 문제 아님). 잠시 후 다시 시도하거나
+아래 **모델 바꾸기**로 더 가벼운 모델을 쓰세요.
+
+## 모델 바꾸기
+
+기본 모델은 `analyzer.py`의 `DEFAULT_MODEL`(`gemini-3.1-flash-lite`)입니다. 바꾸는 방법:
+
+- **영구적으로**: `analyzer.py`의 `DEFAULT_MODEL`을 수정한 뒤 다시 빌드·설치
+- **개발용 실행에서만**: 환경 변수 `GEMINI_MODEL=gemini-2.5-flash python main.py`
+
+이미지 입력과 텍스트 출력을 지원하는 Flash / Flash-Lite 계열을 권장합니다
+(예: `gemini-3.5-flash-lite`, `gemini-2.5-flash-lite`, `gemini-2.5-flash`, `gemini-flash-lite-latest`).
+앱은 지연을 줄이려 사고(thinking) 토큰을 끄므로(`thinking_budget=0`), 이를 허용하지 않는 Pro 계열은 오류가 날 수 있습니다.
+키로 쓸 수 있는 모델 목록은 다음으로 확인할 수 있습니다.
+```bash
+GEMINI_API_KEY="$(security find-generic-password -s rubric_gemini -a GEMINI_API_KEY -w)" .venv/bin/python -c "from google import genai; [print(m.name) for m in genai.Client().models.list()]"
+```
+
 ## 모듈 구조
 
 | 파일 | 역할 |
 | --- | --- |
 | `main.py` | rumps 메뉴바 앱, 키 입력 창, 상태 표시, 5초 자동 복귀 |
 | `config.py` | API 키 저장/로드 (Keychain → `~/.rubric_gemini/config.json`) |
-| `hotkey.py` | Quartz 이벤트 탭으로 수정키 조합 감지(1회/자동), 커서 좌표 조회 |
+| `hotkey.py` | Quartz 이벤트 탭으로 단축키 감지(`⌃⌥⌘` 1회 / `⌃⌥⌘A` 자동 토글), 커서 좌표 조회 |
 | `capture.py` | 커서 중심 캡처(ScreenCaptureKit 우선, mss 대체), 모니터 경계 보정, Retina 배율 계산, 커서 마커 표시 |
-| `analyzer.py` | google-genai 호출, JSON 스키마 강제, 객관식 번호 정규화 |
+| `analyzer.py` | google-genai 호출, JSON 스키마 강제, 객관식 번호 정규화, 번들 SSL 인증서 경로 보정 |
 | `setup.py` / `build_app.sh` / `make_icon.py` / `make_dmg.sh` | py2app 빌드 설정, 빌드 스크립트, 아이콘 생성, DMG 패키징 |
 | `scripts/capture_check.py` | 캡처 진단 (두 백엔드 비교) |
 | `.github/workflows/build-macos.yml` | macOS 26 Apple Silicon 자동 빌드 → DMG 아티팩트 / 릴리스 |
@@ -165,5 +199,22 @@ python main.py
 
 - `choice`: 다른 숫자에 붙어 있지 않은 **맨 앞의 숫자 1~5 하나**만 남깁니다.
   `3번`, `정답: 3`, `정답은 ④번`, `(2) 광합성` → `3`, `3`, `4`, `2`
-- `text`: `3번`, `정답: 5`처럼 형태가 분명한 선택지 번호만 숫자로 바꿉니다.
-  `1945년`, `2차 세계대전` 같은 단답은 그대로 둡니다.
+  숫자가 없으면 알파벳·한글 선택지 기호를 순서대로 숫자로 바꿉니다(A=1 … E=5, ㄱ=1 … ㅁ=5, 가=1 … 마=5).
+  `B`, `(c)`, `D. 광합성`, `정답: E`, `ㄷ`, `나` → `2`, `3`, `4`, `5`, `3`, `2`
+- `text`: `3번`, `정답: 5`, `B`, `(A)`, `B번`처럼 형태가 분명한 선택지 표시만 숫자로 바꿉니다.
+  `1945년`, `2차 세계대전`, `Apple`, `DNA`, `가방` 같은 단답은 그대로 둡니다.
+
+## 변경 내역
+
+### v1.4.0
+- **수정**: 빌드한 앱에서 `API Key: 초기화 실패 ([Errno 2] No such file or directory)`로 분석기가 만들어지지 않던 문제
+  (py2app 번들의 잘못된 `SSL_CERT_FILE`/`SSL_CERT_DIR`을 지우고 certifi 인증서를 사용)
+- **변경**: 5초 자동 분석 토글 단축키 `⌃⌥⇧⌘` → `⌃⌥⌘A` (Hyper 키 충돌 회피, 키 반복 무시)
+- **변경**: 객관식 결과를 항상 아라비아 숫자로 표시 (A–E, ㄱ–ㅁ, 가–마 → 1–5)
+- **변경**: 기본 모델 `gemini-2.5-flash` → `gemini-3.1-flash-lite`, `max_output_tokens` 256 → 2048
+- selftest(`SCREENANSWER_SELFTEST=1`)에 새 단축키·정규화 검사 추가
+
+### v1.3.1
+- 오래된 권한(TCC) 항목 감지 및 메뉴에서 한 번에 권한 초기화
+- macOS 26 단축키 수정, 5초 자동 분석 모드, 캡처 영역 확대
+- 새 `AQ.` 형식 Gemini API 키 지원, 키 오류 메시지 개선
