@@ -10,7 +10,7 @@ from pathlib import Path
 from setuptools import setup
 
 APP_NAME = "ScreenAnswer"
-VERSION = "1.3.0"
+VERSION = "1.3.1"
 BUNDLE_ID = "com.rubric.screenanswer"
 ICON = Path("assets/ScreenAnswer.icns")
 

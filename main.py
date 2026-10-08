@@ -29,7 +29,12 @@ from dotenv import load_dotenv
 
 import config
 from analyzer import Analyzer, AnalyzerError
-from capture import CaptureError, capture_around_cursor
+from capture import (
+    CaptureError,
+    capture_around_cursor,
+    has_screen_capture_access,
+    request_screen_capture_access,
+)
 from hotkey import (
     ACTION_SINGLE,
     ACTION_TOGGLE_AUTO,
@@ -56,6 +61,11 @@ UI_POLL_INTERVAL = 0.1
 # py2app 번들 안에서 실행 중이면 sys.frozen == "macosx_app"
 IS_APP_BUNDLE = getattr(sys, "frozen", None) == "macosx_app"
 LOG_FILE = Path.home() / "Library" / "Logs" / f"{APP_NAME}.log"
+
+DEFAULT_BUNDLE_ID = "com.rubric.screenanswer"
+# 권한 초기화 후 재실행했음을 알리는 실행 인자 (같은 안내가 반복되지 않도록)
+AFTER_RESET_ARG = "--after-permission-reset"
+TCC_SERVICES = ("ScreenCapture", "ListenEvent", "Accessibility")
 
 PRIVACY_PANES = {
     "화면 기록": "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
@@ -93,6 +103,14 @@ def _copy_to_clipboard(text: str) -> None:
     subprocess.run(["pbcopy"], input=text.encode("utf-8"), check=False)
 
 
+def _command_output(args: list[str]) -> str:
+    try:
+        result = subprocess.run(args, capture_output=True, text=True, timeout=5)
+        return (result.stdout + result.stderr).strip()
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"({type(exc).__name__})"
+
+
 def _bring_app_to_front() -> None:
     """모달 창이 다른 앱 뒤에 숨지 않도록 앱을 앞으로 가져온다."""
     try:
@@ -120,6 +138,11 @@ class ScreenAnswerApp(rumps.App):
         self.permissions_menu = rumps.MenuItem("권한 설정 열기")
         for label in PRIVACY_PANES:
             self.permissions_menu.add(rumps.MenuItem(label, callback=self.on_open_privacy))
+        self.permissions_menu.add(None)
+        self.permissions_menu.add(
+            rumps.MenuItem("권한 초기화 후 재시작…", callback=self.on_reset_permissions)
+        )
+        self.permissions_menu.add(rumps.MenuItem("진단 정보 복사", callback=self.on_copy_diagnostics))
 
         self.menu = [
             self.result_item,
@@ -154,17 +177,20 @@ class ScreenAnswerApp(rumps.App):
             self._apply_api_key(stored, verify=False)
         else:
             self._set_missing_key_state()
-            # 메인 런루프가 돌기 시작한 직후에 최초 실행 키 입력 창을 띄운다.
-            self._first_run_timer = rumps.Timer(self._on_first_run_prompt, 0.8)
-            self._first_run_timer.start()
+        # 메인 런루프가 돌기 시작한 직후에 키 입력 창/권한 안내를 띄운다.
+        self._startup_timer = rumps.Timer(self._on_startup, 0.8)
+        self._startup_timer.start()
 
         self._ui_timer = rumps.Timer(self._drain_ui_events, UI_POLL_INTERVAL)
         self._ui_timer.start()
 
         self._hotkey = HotkeyListener(self._on_hotkey)
+        # 권한이 없으면 시스템 요청 창을 띄우고 설정 목록에 앱을 등록한다.
         if not has_input_monitoring_access():
-            # 시스템 권한 요청 창을 띄우고 '입력 모니터링' 목록에 앱을 등록한다.
             request_input_monitoring_access()
+        if not has_screen_capture_access():
+            request_screen_capture_access()
+        logger.info("진단 정보:\n%s", self._diagnostics())
         self._hotkey.start()
         self._update_hotkey_status()
         # 권한이 나중에 허용되거나 macOS가 탭을 꺼 버린 경우를 주기적으로 복구한다.
@@ -191,10 +217,126 @@ class ScreenAnswerApp(rumps.App):
 
     # ---------- API 키 ----------
 
-    def _on_first_run_prompt(self, timer: rumps.Timer) -> None:
+    def _on_startup(self, timer: rumps.Timer) -> None:
         timer.stop()
         if self._analyzer is None:
             self._prompt_api_key(first_run=True)
+        self._check_permissions_on_startup()
+
+    # ---------- macOS 권한 (TCC) ----------
+
+    def _missing_permissions(self) -> list[str]:
+        missing = []
+        if not has_screen_capture_access():
+            missing.append("화면 기록")
+        if not has_input_monitoring_access():
+            missing.append("입력 모니터링")
+        return missing
+
+    def _check_permissions_on_startup(self) -> None:
+        missing = self._missing_permissions()
+        if not missing:
+            return
+        _bring_app_to_front()
+        if AFTER_RESET_ARG in sys.argv:
+            # 초기화 직후: 이제 새로 허용만 하면 된다.
+            clicked = rumps.alert(
+                title="권한을 새로 허용해 주세요",
+                message=(
+                    f"필요한 권한: {', '.join(missing)}\n\n"
+                    "시스템 설정에서 ScreenAnswer를 켠 뒤, 메뉴의 종료(Quit)로 끄고 "
+                    "앱을 다시 실행하세요. (macOS가 '종료 후 다시 열기'를 물으면 눌러도 됩니다)"
+                ),
+                ok="설정 열기",
+                cancel="나중에",
+            )
+            if clicked == 1:
+                self._open_privacy_pane(missing[0])
+            return
+
+        clicked = rumps.alert(
+            title="macOS 권한이 적용되지 않았습니다",
+            message=(
+                f"macOS가 이 앱에 다음 권한을 허용하지 않고 있습니다: {', '.join(missing)}\n\n"
+                "• 처음 설치했다면: '설정 열기'에서 ScreenAnswer를 켠 뒤 앱을 다시 실행하세요.\n"
+                "• 설정에서 이미 켜져 있는데도 이 창이 뜬다면: 이전 버전 앱 기준으로 등록된 "
+                "권한이라 새 버전에 적용되지 않는 상태입니다. '권한 초기화 후 재시작'을 누른 뒤 "
+                "다시 허용해 주세요. (앱을 업데이트할 때마다 한 번씩 필요합니다)"
+            ),
+            ok="권한 초기화 후 재시작",
+            cancel="나중에",
+            other="설정 열기",
+        )
+        if clicked == 1:
+            self._reset_permissions_and_relaunch()
+        elif clicked == -1:
+            self._open_privacy_pane(missing[0])
+
+    def _open_privacy_pane(self, label: str) -> None:
+        subprocess.run(["open", PRIVACY_PANES[label]], check=False)
+
+    @staticmethod
+    def _bundle_info() -> tuple[str, str | None]:
+        """(번들 ID, .app 경로) — 소스 실행 시 경로는 None."""
+        try:
+            from AppKit import NSBundle
+
+            bundle = NSBundle.mainBundle()
+            bundle_id = str(bundle.bundleIdentifier() or DEFAULT_BUNDLE_ID)
+            path = str(bundle.bundlePath()) if IS_APP_BUNDLE else None
+            return bundle_id, path
+        except Exception:
+            return DEFAULT_BUNDLE_ID, None
+
+    def _reset_permissions_and_relaunch(self) -> None:
+        bundle_id, app_path = self._bundle_info()
+        if app_path is None:
+            rumps.alert(
+                title="소스 실행 중",
+                message="터미널에서 실행 중일 때는 권한이 터미널 앱에 적용됩니다. "
+                "터미널(또는 VS Code)에 권한을 허용하세요.",
+            )
+            return
+
+        self._set_auto(False)
+        for service in TCC_SERVICES:
+            # 이 앱(번들 ID)의 항목만 지운다. 다른 앱 권한에는 영향 없음, sudo 불필요.
+            result = subprocess.run(
+                ["tccutil", "reset", service, bundle_id], capture_output=True, text=True
+            )
+            logger.info(
+                "tccutil reset %s %s → %s %s",
+                service,
+                bundle_id,
+                result.returncode,
+                (result.stdout + result.stderr).strip(),
+            )
+
+        # 앱이 완전히 종료된 뒤 새 인스턴스로 다시 연다(TCC가 새 프로세스를 기준으로 판단).
+        subprocess.Popen(
+            ["/bin/sh", "-c", f'sleep 1.5; open -n "$0" --args {AFTER_RESET_ARG}', app_path],
+            start_new_session=True,
+        )
+        self.on_quit(None)
+
+    def _diagnostics(self) -> str:
+        bundle_id, app_path = self._bundle_info()
+        lines = [
+            f"앱: {APP_NAME} (frozen={IS_APP_BUNDLE})",
+            f"번들 ID: {bundle_id}",
+            f"경로: {app_path or sys.executable}",
+            f"macOS: {_command_output(['sw_vers', '-productVersion'])}",
+            f"화면 기록 권한: {has_screen_capture_access()}",
+            f"입력 모니터링 권한: {has_input_monitoring_access()}",
+        ]
+        if app_path:
+            designated = [
+                line
+                for line in _command_output(["codesign", "-d", "-r-", app_path]).splitlines()
+                if "designated" in line
+            ]
+            lines.append(f"서명 요구사항: {designated[0].strip() if designated else '(확인 불가)'}")
+        return "\n".join(lines)
 
     def _prompt_api_key(self, first_run: bool = False) -> None:
         if self._prompt_open:
@@ -518,13 +660,33 @@ class ScreenAnswerApp(rumps.App):
         if self._hotkey.active:
             return
         request_input_monitoring_access()
-        subprocess.run(["open", PRIVACY_PANES["입력 모니터링"]], check=False)
+        self._check_permissions_on_startup()
+
+    def on_reset_permissions(self, _sender: rumps.MenuItem) -> None:
+        _bring_app_to_front()
+        clicked = rumps.alert(
+            title="권한 초기화 후 재시작",
+            message=(
+                "ScreenAnswer의 화면 기록·입력 모니터링·손쉬운 사용 권한 항목을 지우고 앱을 "
+                "다시 시작합니다. 다시 시작되면 권한을 새로 허용해 주세요.\n"
+                "(다른 앱의 권한에는 영향이 없습니다)"
+            ),
+            ok="초기화 후 재시작",
+            cancel="취소",
+        )
+        if clicked == 1:
+            self._reset_permissions_and_relaunch()
+
+    def on_copy_diagnostics(self, _sender: rumps.MenuItem) -> None:
+        info = self._diagnostics()
+        _copy_to_clipboard(info)
+        rumps.alert(title="진단 정보가 복사되었습니다", message=info)
 
     def on_set_api_key(self, _sender: rumps.MenuItem) -> None:
         self._prompt_api_key()
 
     def on_open_privacy(self, sender: rumps.MenuItem) -> None:
-        subprocess.run(["open", PRIVACY_PANES[sender.title]], check=False)
+        self._open_privacy_pane(sender.title)
 
     def on_copy_result(self, _sender: rumps.MenuItem) -> None:
         if self._result_text:
@@ -548,7 +710,7 @@ class ScreenAnswerApp(rumps.App):
         else:
             self.title = AUTO_IDLE_TITLE if self.auto_running else IDLE_TITLE
 
-    def on_quit(self, _sender: rumps.MenuItem) -> None:
+    def on_quit(self, _sender: rumps.MenuItem | None) -> None:
         self._set_auto(False)
         self._hotkey_timer.stop()
         self._hotkey.stop()
